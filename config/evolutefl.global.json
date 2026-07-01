@@ -1,0 +1,81 @@
+{
+  "llm": {
+    "base_url": "https://api.openai.com/v1",
+    "base_url_env": "OPENAI_BASE_URL",
+    "api_key_env": "OPENAI_API_KEY",
+    "model": "gpt-4o-mini",
+    "temperature": 0.2,
+    "max_tokens": 4096,
+    "timeout": 120,
+    "providers": {
+      "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "model": "gpt-4o-mini"
+      },
+      "deepseek": {
+        "base_url": "",
+        "base_url_env": "DEEPSEEK_BASE_URL",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "model": "deepseek-v4-flash"
+      },
+      "key77": {
+        "base_url": "https://api.key77qiqi.cn/v1",
+        "api_key_env": "KEY77_API_KEY",
+        "model": "gpt-4o-mini"
+      },
+      "minimax": {
+        "base_url": "https://api.minimaxi.com/v1",
+        "api_key_env": "MINIMAX_API_KEY",
+        "model": "MiniMax-M1"
+      }
+    }
+  },
+  "explorer": {
+    "max_steps": 30,
+    "response_retries": 2,
+    "checkpoint_interval": 8,
+    "finalization_steps": 3,
+    "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt"
+  },
+  "reflection": {
+    "insight_prompt_path": "prompt_records/reflection/reflection_insight_v1.txt",
+    "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt"
+  },
+  "skill_bank": {
+    "path": "skill_pools/skill_bank_v0/skills.jsonl",
+    "retrieval_mode": "lexical",
+    "max_matched_skills": 5,
+    "min_score": 4.0,
+    "project_type_min_score": 6.0,
+    "embedding_min_score": 0.48,
+    "embedding_fallback_to_lexical": false,
+    "max_per_dimension": {
+      "general": 1,
+      "project_type": 1,
+      "fault_mode": 2,
+      "strategy_type": 1
+    }
+  },
+  "embedding": {
+    "enabled": false,
+    "base_url": "http://127.0.0.1:8008",
+    "base_url_env": "EVOLUTEFL_EMBEDDING_BASE_URL",
+    "endpoint": "/embed",
+    "model": "jina-embeddings-v3",
+    "query_task": "retrieval.query",
+    "document_task": "retrieval.passage",
+    "cache_path": "skill_pools/skill_bank_v0/embeddings/jina_v3/skill_embeddings.jsonl",
+    "batch_size": 16,
+    "timeout": 120
+  },
+  "assembler": {
+    "max_knowledge_chars": 900,
+    "max_per_dimension": {
+      "general": 1,
+      "project_type": 1,
+      "fault_mode": 2,
+      "strategy_type": 1
+    }
+  }
+}
