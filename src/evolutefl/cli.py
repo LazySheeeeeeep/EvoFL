@@ -92,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     general.add_argument("--input-run-dir", required=True)
     general.add_argument("--output-dir")
     general.add_argument("--window-size", type=int)
+    general.add_argument("--attempts", type=int, default=3)
+    general.add_argument("--general-minibatch-size", type=int)
+    general.add_argument("--general-edit-budget", type=int)
+    general.add_argument("--general-merge-budget", type=int)
     general.add_argument("--dry-run", action="store_true", help="Validate and write outputs without updating SkillBank.")
     general.set_defaults(func=cmd_run_general_reflection)
 
@@ -215,6 +219,10 @@ def cmd_run_general_reflection(args: argparse.Namespace) -> Any:
         output_dir=args.output_dir,
         window_size=args.window_size,
         apply_updates=not args.dry_run,
+        attempts=args.attempts,
+        minibatch_size=args.general_minibatch_size,
+        edit_budget=args.general_edit_budget,
+        merge_budget=args.general_merge_budget,
     )
 
 
