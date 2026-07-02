@@ -40,7 +40,8 @@
   },
   "reflection": {
     "insight_prompt_path": "prompt_records/reflection/reflection_insight_v1.txt",
-    "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt"
+    "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt",
+    "general_reflector_prompt_path": "prompt_records/reflection/general_meta_reflector_v0.txt"
   },
   "skill_bank": {
     "path": "skill_pools/skill_bank_v0/skills.jsonl",
