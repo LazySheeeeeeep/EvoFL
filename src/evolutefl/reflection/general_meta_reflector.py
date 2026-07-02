@@ -195,22 +195,12 @@ def _merge_general_candidates(
     if not candidates:
         return _general_no_update_from_analyst_outputs(analyst_outputs), []
     if len(analyst_outputs) == 1:
-        final = {
-            "batch_summary": analyst_outputs[0].get("batch_summary", ""),
-            "dimension_coverage_summary": analyst_outputs[0].get("dimension_coverage_summary", ""),
-            "residual_patterns": analyst_outputs[0].get("common_residual_patterns", []),
-            "proposed_general_updates": candidates[:merge_budget],
-            "no_update_reason": None,
-        }
-        return (
-            validate_general_reflector_output(
-                final,
-                existing_general_skills=existing_general_skills,
-                residual_cards=residual_cards,
-                update_budget=merge_budget,
-            ),
-            [],
-        )
+        return _general_output_from_candidates(
+            candidates,
+            analyst_outputs=analyst_outputs,
+            merge_budget=merge_budget,
+            fallback_reason="Single analyst minibatch; merge step not required.",
+        ), []
 
     payload = {
         "task": "merge_general_patch_candidates",
@@ -249,7 +239,13 @@ def _merge_general_candidates(
             last_error = exc
             debug_attempts.append({"attempt": attempt, "error": str(exc), "raw_response": content})
             messages = _repair_messages(messages, exc)
-    return _general_no_update_fallback(last_error), debug_attempts
+    fallback = _general_output_from_candidates(
+        candidates,
+        analyst_outputs=analyst_outputs,
+        merge_budget=merge_budget,
+        fallback_reason=f"Merge LLM failed; using top analyst candidates directly. Last error: {last_error}",
+    )
+    return fallback, debug_attempts
 
 
 def validate_general_analyst_output(
@@ -463,6 +459,28 @@ def _general_no_update_from_analyst_outputs(outputs: list[dict[str, Any]]) -> di
         "proposed_general_updates": [],
         "materialized_edits": [],
         "no_update_reason": "; ".join(reasons) or "No general patch candidate selected.",
+    }
+
+
+def _general_output_from_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    analyst_outputs: list[dict[str, Any]],
+    merge_budget: int,
+    fallback_reason: str,
+) -> dict[str, Any]:
+    selected = candidates[: max(0, merge_budget)]
+    return {
+        "batch_summary": fallback_reason,
+        "dimension_coverage_summary": "Fallback output assembled from minibatch analyst candidates.",
+        "residual_patterns": [
+            pattern
+            for output in analyst_outputs
+            for pattern in output.get("common_residual_patterns", [])
+        ],
+        "proposed_general_updates": selected,
+        "materialized_edits": [update["edit"] for update in selected if update.get("edit") is not None],
+        "no_update_reason": None if selected else fallback_reason,
     }
 
 
