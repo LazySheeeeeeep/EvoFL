@@ -10,7 +10,7 @@ from evolutefl.config import llm_config, load_config
 from evolutefl.explorer import run_explorer
 from evolutefl.json_utils import read_json
 from evolutefl.llm.client import OpenAICompatibleClient
-from evolutefl.reflection import run_case_evolution, run_general_reflection
+from evolutefl.reflection import run_case_evolution
 from evolutefl.skills import assemble_skill_context, make_skill_bank, render_skill_context
 from evolutefl.tools import ToolRegistry, register_builtin_tools
 
@@ -85,15 +85,6 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--no-reflect-failure", dest="reflect_failure", action="store_false")
     evolve.add_argument("--output-dir")
     evolve.set_defaults(func=cmd_run_case_evolution)
-
-    general = sub.add_parser("run-general-reflection", help="Batch-level residual reflection for general skills.")
-    add_config_arg(general)
-    add_llm_args(general)
-    general.add_argument("--input-run-dir", required=True)
-    general.add_argument("--output-dir")
-    general.add_argument("--window-size", type=int)
-    general.add_argument("--dry-run", action="store_true", help="Validate and write outputs without updating SkillBank.")
-    general.set_defaults(func=cmd_run_general_reflection)
 
     return parser
 
@@ -201,20 +192,6 @@ def cmd_run_case_evolution(args: argparse.Namespace) -> Any:
         reflect_success=args.reflect_success,
         reflect_failure=args.reflect_failure,
         legacy_insight=args.legacy_insight,
-    )
-
-
-def cmd_run_general_reflection(args: argparse.Namespace) -> Any:
-    config = load_config(args.config)
-    config["llm"] = llm_config(config, args.provider, args.model)
-    client = OpenAICompatibleClient.from_config(config["llm"])
-    return run_general_reflection(
-        input_run_dir=args.input_run_dir,
-        config=config,
-        llm_client=client,
-        output_dir=args.output_dir,
-        window_size=args.window_size,
-        apply_updates=not args.dry_run,
     )
 
 

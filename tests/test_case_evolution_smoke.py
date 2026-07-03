@@ -60,33 +60,20 @@ def test_case_evolution_failure_uses_trajectory_direct_reflector(tmpdir) -> None
         "optimization_intent": "correct",
         "dimension_assessment": {
             "general": {
-                "learnable": "weak",
-                "candidate_value": "unknown",
-                "what_can_be_learned": "A possible residual ranking lesson can be considered later.",
+                "learnable": "strong",
+                "candidate_value": "root_cause_ranking",
+                "what_can_be_learned": "Rank state producers above symptom reporters.",
             },
             "project_type": {"learnable": "none", "candidate_value": "unknown", "what_can_be_learned": "None."},
             "fault_mode": {"learnable": "none", "candidate_value": "unknown", "what_can_be_learned": "None."},
-            "strategy_type": {
-                "learnable": "strong",
-                "candidate_value": "root_cause_before_reporter_ranking",
-                "what_can_be_learned": "Rank state producers above symptom reporters.",
-            },
+            "strategy_type": {"learnable": "none", "candidate_value": "unknown", "what_can_be_learned": "None."},
         },
         "dimension_updates": {
             "general": {
-                "decision": "no_update",
-                "target_value": "unknown",
-                "target_skill_id": None,
-                "rationale": "General updates are handled by batch-level residual reflection.",
-                "edit": None,
-            },
-            "project_type": _no_update(),
-            "fault_mode": _no_update(),
-            "strategy_type": {
                 "decision": "create_new",
-                "target_value": "root_cause_before_reporter_ranking",
+                "target_value": "root_cause_ranking",
                 "target_skill_id": None,
-                "rationale": "The transferable lesson is a strategy-level root-cause ranking principle.",
+                "rationale": "The transferable lesson is a general root-cause ranking principle.",
                 "edit": {
                     "operation": "add",
                     "field": "skill.knowledge",
@@ -105,23 +92,9 @@ def test_case_evolution_failure_uses_trajectory_direct_reflector(tmpdir) -> None
                     "risk": "Could over-prioritize producers without evidence.",
                 },
             },
-        },
-        "residual_card": {
-            "instance_id": "case1",
-            "outcome_type": "failure",
-            "dimension_coverage": {
-                "project_type": {"verdict": "irrelevant", "value": "unknown", "evidence": "No project-type lesson."},
-                "fault_mode": {"verdict": "irrelevant", "value": "unknown", "evidence": "No fault-mode lesson."},
-                "strategy_type": {
-                    "verdict": "covered",
-                    "value": "root_cause_before_reporter_ranking",
-                    "evidence": "Strategy update captures the ranking lesson.",
-                },
-            },
-            "best_explaining_dimension": "strategy_type",
-            "residual_lesson": "",
-            "residual_reason": "Strategy dimension explains the lesson.",
-            "supporting_evidence": ["Top-5 missed producer."],
+            "project_type": _no_update(),
+            "fault_mode": _no_update(),
+            "strategy_type": _no_update(),
         },
         "no_update_reason": None,
     }
@@ -140,7 +113,6 @@ def test_case_evolution_failure_uses_trajectory_direct_reflector(tmpdir) -> None
     assert summary["outcome"]["label"] == "failure"
     assert summary["updated_skill_ids"]
     assert (case_dir / "case_evolution" / "trajectory_evidence.json").exists()
-    assert (case_dir / "case_evolution" / "residual_card.json").exists()
     assert not (case_dir / "case_evolution" / "insight.json").exists()
     assert len(fake.calls) == 1
 
@@ -153,10 +125,10 @@ def test_case_evolution_success_can_preserve_existing_skill(tmpdir) -> None:
     skill_path.write_text(
         json.dumps(
             {
-                "skill_id": "strategy_root_cause_ranking_v1",
+                "skill_id": "general_root_cause_ranking_v1",
                 "status": "active",
                 "version": 1,
-                "dimension": "strategy_type",
+                "dimension": "general",
                 "value": "root_cause_ranking",
                 "retrieval_text": "root cause ranking reporter producer symptom cause",
                 "skill": {
@@ -177,33 +149,20 @@ def test_case_evolution_success_can_preserve_existing_skill(tmpdir) -> None:
         "optimization_intent": "preserve",
         "dimension_assessment": {
             "general": {
-                "learnable": "none",
-                "candidate_value": "unknown",
-                "what_can_be_learned": "No residual general lesson.",
+                "learnable": "strong",
+                "candidate_value": "root_cause_ranking",
+                "what_can_be_learned": "Existing root-cause ranking skill explains the success.",
             },
             "project_type": {"learnable": "none", "candidate_value": "unknown", "what_can_be_learned": "None."},
             "fault_mode": {"learnable": "none", "candidate_value": "unknown", "what_can_be_learned": "None."},
-            "strategy_type": {
-                "learnable": "strong",
-                "candidate_value": "root_cause_ranking",
-                "what_can_be_learned": "Existing strategy skill explains the success.",
-            },
+            "strategy_type": {"learnable": "none", "candidate_value": "unknown", "what_can_be_learned": "None."},
         },
         "dimension_updates": {
             "general": {
-                "decision": "no_update",
-                "target_value": "unknown",
-                "target_skill_id": None,
-                "rationale": "No residual general lesson.",
-                "edit": None,
-            },
-            "project_type": _no_update(),
-            "fault_mode": _no_update(),
-            "strategy_type": {
                 "decision": "preserve_existing",
                 "target_value": "root_cause_ranking",
-                "target_skill_id": "strategy_root_cause_ranking_v1",
-                "rationale": "The retrieved strategy ranking skill explains the successful trajectory.",
+                "target_skill_id": "general_root_cause_ranking_v1",
+                "rationale": "The retrieved general ranking skill explains the successful trajectory.",
                 "edit": {
                     "operation": "preserve",
                     "field": "skill.knowledge",
@@ -213,23 +172,9 @@ def test_case_evolution_success_can_preserve_existing_skill(tmpdir) -> None:
                     "risk": "None.",
                 },
             },
-        },
-        "residual_card": {
-            "instance_id": "case1",
-            "outcome_type": "success",
-            "dimension_coverage": {
-                "project_type": {"verdict": "irrelevant", "value": "unknown", "evidence": "No project-type lesson."},
-                "fault_mode": {"verdict": "irrelevant", "value": "unknown", "evidence": "No fault-mode lesson."},
-                "strategy_type": {
-                    "verdict": "covered",
-                    "value": "root_cause_ranking",
-                    "evidence": "Strategy skill explains the trajectory.",
-                },
-            },
-            "best_explaining_dimension": "strategy_type",
-            "residual_lesson": "",
-            "residual_reason": "Strategy dimension explains the lesson.",
-            "supporting_evidence": ["Top-5 hit ground truth."],
+            "project_type": _no_update(),
+            "fault_mode": _no_update(),
+            "strategy_type": _no_update(),
         },
         "no_update_reason": None,
     }

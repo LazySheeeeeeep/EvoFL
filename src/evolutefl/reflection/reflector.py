@@ -12,8 +12,6 @@ EDIT_OPERATIONS = ("add", "replace", "delete", "preserve")
 EDIT_FIELDS = ("skill.knowledge", "skill.trigger", "skill.anti_patterns", "retrieval_text")
 UPDATE_DECISIONS = ("update_existing", "create_new", "no_update", "preserve_existing")
 LEARNABLE_LEVELS = ("none", "weak", "strong")
-RESIDUAL_SOURCE_DIMENSIONS = ("project_type", "fault_mode", "strategy_type")
-RESIDUAL_VERDICTS = ("covered", "missing", "weak", "irrelevant")
 
 
 def run_reflector(
@@ -127,15 +125,6 @@ def _validate_dimension_updates_output(
 
     payload["dimension_updates"] = normalized_updates
     payload["dimension_assessment"] = _normalize_multi_dimension_assessment(payload, normalized_updates)
-    payload["residual_card"] = _normalize_residual_card(
-        payload,
-        normalized_updates,
-        insight,
-        trajectory_evidence,
-        source_case=source_case,
-        outcome_type=outcome_type,
-        default_evidence=default_evidence,
-    )
     payload["materialized_edits"] = normalized_edits
     payload.setdefault("case_summary", "")
     payload.setdefault("outcome_type", outcome_type)
@@ -158,11 +147,6 @@ def _validate_single_dimension_update(
     decision = str(raw_update.get("decision") or "no_update").strip()
     if decision not in UPDATE_DECISIONS:
         raise ValueError(f"dimension_updates.{dimension}.decision is invalid: {decision!r}")
-    if dimension == "general" and decision != "no_update":
-        raise ValueError(
-            "Case-level Reflector cannot create, update, or preserve general skills. "
-            "Write cross-dimensional lessons into residual_card for batch-level general reflection."
-        )
     target_value = str(raw_update.get("target_value") or "unknown").strip() or "unknown"
     target_skill_id = raw_update.get("target_skill_id")
     if target_skill_id is not None:
@@ -314,94 +298,6 @@ def _normalize_multi_dimension_assessment(
     return normalized
 
 
-def _normalize_residual_card(
-    payload: dict[str, Any],
-    dimension_updates: dict[str, dict[str, Any]],
-    insight: dict[str, Any] | None,
-    trajectory_evidence: dict[str, Any] | None,
-    *,
-    source_case: str | None,
-    outcome_type: str,
-    default_evidence: list[Any],
-) -> dict[str, Any]:
-    raw = payload.get("residual_card")
-    if not isinstance(raw, dict):
-        raw = {}
-    raw_coverage = raw.get("dimension_coverage") if isinstance(raw.get("dimension_coverage"), dict) else {}
-    assessment = payload.get("dimension_assessment") if isinstance(payload.get("dimension_assessment"), dict) else {}
-
-    dimension_coverage: dict[str, dict[str, str]] = {}
-    for dimension in RESIDUAL_SOURCE_DIMENSIONS:
-        raw_dim = raw_coverage.get(dimension) if isinstance(raw_coverage.get(dimension), dict) else {}
-        assessed = assessment.get(dimension) if isinstance(assessment.get(dimension), dict) else {}
-        update = dimension_updates.get(dimension, {})
-        verdict = str(raw_dim.get("verdict") or _coverage_verdict(update, assessed)).strip().lower()
-        if verdict not in RESIDUAL_VERDICTS:
-            verdict = _coverage_verdict(update, assessed)
-        value = str(raw_dim.get("value") or assessed.get("candidate_value") or update.get("target_value") or "unknown")
-        evidence = str(raw_dim.get("evidence") or update.get("rationale") or assessed.get("what_can_be_learned") or "")
-        dimension_coverage[dimension] = {
-            "verdict": verdict,
-            "value": value or "unknown",
-            "evidence": evidence,
-        }
-
-    best = str(raw.get("best_explaining_dimension") or raw.get("best_dimension") or "").strip()
-    if best not in (*RESIDUAL_SOURCE_DIMENSIONS, "none"):
-        best = _best_explaining_dimension(dimension_coverage)
-
-    general_assessment = assessment.get("general") if isinstance(assessment.get("general"), dict) else {}
-    residual_lesson = str(
-        raw.get("residual_lesson")
-        or raw.get("lesson")
-        or general_assessment.get("what_can_be_learned")
-        or ""
-    ).strip()
-    residual_reason = str(
-        raw.get("residual_reason")
-        or raw.get("why_not_dimension_skill")
-        or dimension_updates.get("general", {}).get("no_update_reason")
-        or dimension_updates.get("general", {}).get("rationale")
-        or ""
-    ).strip()
-    supporting_evidence = raw.get("supporting_evidence") or raw.get("evidence") or default_evidence
-    if not isinstance(supporting_evidence, list):
-        supporting_evidence = [supporting_evidence]
-
-    return {
-        "instance_id": raw.get("instance_id") or source_case,
-        "outcome_type": raw.get("outcome_type") or outcome_type,
-        "dimension_coverage": dimension_coverage,
-        "best_explaining_dimension": best,
-        "residual_lesson": residual_lesson,
-        "residual_reason": residual_reason,
-        "supporting_evidence": [str(item) for item in supporting_evidence if str(item)],
-        "source": "case_level_reflector",
-    }
-
-
-def _coverage_verdict(update: dict[str, Any], assessed: dict[str, Any]) -> str:
-    decision = update.get("decision")
-    if decision in ("update_existing", "create_new", "preserve_existing"):
-        return "covered"
-    learnable = str(assessed.get("learnable") or "").lower()
-    if learnable == "strong":
-        return "missing"
-    if learnable == "weak":
-        return "weak"
-    return "irrelevant"
-
-
-def _best_explaining_dimension(dimension_coverage: dict[str, dict[str, str]]) -> str:
-    for preferred in ("fault_mode", "strategy_type", "project_type"):
-        if dimension_coverage.get(preferred, {}).get("verdict") == "covered":
-            return preferred
-    for preferred in ("fault_mode", "strategy_type", "project_type"):
-        if dimension_coverage.get(preferred, {}).get("verdict") == "missing":
-            return preferred
-    return "none"
-
-
 def _combined_no_update_reason(dimension_updates: dict[str, dict[str, Any]]) -> str:
     reasons = []
     for dimension in DIMENSIONS:
@@ -467,7 +363,6 @@ def _no_update_fallback(
     analysis = (insight or {}).get("analysis", {})
     outcome = (trajectory_evidence or {}).get("outcome", {})
     outcome_type = analysis.get("outcome_type") or outcome.get("label") or "failure"
-    source_case = (insight or {}).get("instance_id") or (trajectory_evidence or {}).get("case", {}).get("instance_id")
     return {
         "case_summary": "Reflector did not return a valid bounded skill edit.",
         "outcome_type": outcome_type,
@@ -490,23 +385,6 @@ def _no_update_fallback(
                 "no_update_reason": "Reflector output could not be validated.",
             }
             for dimension in DIMENSIONS
-        },
-        "residual_card": {
-            "instance_id": source_case,
-            "outcome_type": outcome_type,
-            "dimension_coverage": {
-                dimension: {
-                    "verdict": "irrelevant",
-                    "value": "unknown",
-                    "evidence": "Reflector protocol failure prevented reliable dimension attribution.",
-                }
-                for dimension in RESIDUAL_SOURCE_DIMENSIONS
-            },
-            "best_explaining_dimension": "none",
-            "residual_lesson": "",
-            "residual_reason": "Reflector output could not be validated.",
-            "supporting_evidence": [],
-            "source": "case_level_reflector_fallback",
         },
         "materialized_edits": [],
         "no_update_reason": f"Reflector protocol failure; SkillBank left unchanged. Last error: {error}",

@@ -138,8 +138,6 @@ def run_case_evolution(
         output_path=out_dir / "reflector_debug.json",
     )
     write_json(out_dir / "reflector_output.json", reflector_output)
-    residual_card = reflector_output.get("residual_card") or {}
-    write_json(out_dir / "residual_card.json", residual_card)
 
     applied_edits: list[dict[str, Any]] = []
     for edit in reflector_output.get("materialized_edits", []):
@@ -155,8 +153,6 @@ def run_case_evolution(
             "reflector_output": reflector_output,
             "dimension_assessment": reflector_output.get("dimension_assessment"),
             "dimension_updates": reflector_output.get("dimension_updates"),
-            "residual_card": residual_card,
-            "residual_card_path": str(out_dir / "residual_card.json"),
             "applied_edits": applied_edits,
             "outcome_type": outcome.get("label"),
             "updated_skill_ids": [item.get("updated_skill_id") for item in applied_edits if item.get("updated_skill_id")],
