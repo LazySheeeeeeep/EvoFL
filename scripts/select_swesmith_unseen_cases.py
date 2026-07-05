@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> int:
     args = build_parser().parse_args()
-    seen = load_seen(args.exclude_selected_cases)
+    seen = load_seen([*args.exclude_selected_cases, *expand_exclude_globs(args.exclude_glob)])
     local_images = available_images()
     rows = list(load_rows(args.dataset_name, args.split))
     random.Random(args.seed).shuffle(rows)
@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260624)
     parser.add_argument("--output-file", required=True)
     parser.add_argument("--exclude-selected-cases", action="append", default=[])
+    parser.add_argument(
+        "--exclude-glob",
+        action="append",
+        default=[],
+        help="Glob pattern for selected_cases.json files to exclude, relative to the repo root.",
+    )
     return parser
 
 
@@ -79,6 +85,13 @@ def load_seen(paths: list[str]) -> set[str]:
             if instance_id:
                 seen.add(instance_id)
     return seen
+
+
+def expand_exclude_globs(patterns: list[str]) -> list[str]:
+    paths: list[str] = []
+    for pattern in patterns:
+        paths.extend(str(path) for path in ROOT.glob(pattern))
+    return sorted(set(paths))
 
 
 def load_rows(dataset_name: str, split: str) -> list[dict[str, Any]]:
