@@ -18,6 +18,7 @@ def run_reflector(
     *,
     insight: dict[str, Any] | None = None,
     trajectory_evidence: dict[str, Any] | None = None,
+    issue_abstraction: dict[str, Any] | None = None,
     skill_search_context: dict[str, Any],
     llm_client: Any,
     prompt: str,
@@ -27,6 +28,7 @@ def run_reflector(
     if insight is None and trajectory_evidence is None:
         raise ValueError("run_reflector requires insight or trajectory_evidence.")
     payload = {
+        "issue_abstraction": issue_abstraction,
         "trajectory_evidence": trajectory_evidence,
         "insight": insight,
         "skill_search_context": skill_search_context,

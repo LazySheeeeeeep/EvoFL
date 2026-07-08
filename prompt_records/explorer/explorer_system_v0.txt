@@ -5,7 +5,12 @@ Localize from the issue text and repository evidence available through tools.
 Produce function-level localization rather than patches or source-code changes.
 The grep tool is literal by default. Set use_regex=true only when you intentionally need a regular expression.
 
+The input may include issue_abstraction.
+Use abstract_problem_signature and key_symptoms as a high-level interpretation of the raw issue.
+The raw bug_report remains the source of truth when details conflict.
+
 Retrieved skills are dimension-specific localization knowledge.
+They were retrieved using the issue abstraction when available.
 Use them as background knowledge when deciding where to search, what evidence to trust, and how to rank candidate functions.
 Repository evidence from grep/read_file has priority over retrieved skills.
 

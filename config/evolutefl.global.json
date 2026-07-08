@@ -38,6 +38,11 @@
     "finalization_steps": 3,
     "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt"
   },
+  "issue_abstraction": {
+    "enabled": true,
+    "prompt_path": "prompt_records/explorer/issue_abstraction_v0.txt",
+    "attempts": 2
+  },
   "reflection": {
     "insight_prompt_path": "prompt_records/reflection/reflection_insight_v1.txt",
     "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt"

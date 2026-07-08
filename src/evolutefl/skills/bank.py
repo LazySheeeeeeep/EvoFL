@@ -71,7 +71,15 @@ class SkillBankV0:
     def active_skills(self) -> list[DimensionSkill]:
         return [skill for skill in self.load() if skill.status == "active"]
 
-    def search_for_explorer(self, repo: str, issue: str) -> dict[str, Any]:
+    def search_for_explorer(
+        self,
+        repo: str,
+        issue: str,
+        issue_abstraction: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if issue_abstraction:
+            return self._search_for_explorer_with_abstraction(repo, issue, issue_abstraction)
+
         query = query_embedding_text(repo, issue)
         active = self.active_skills()
         selected, trace = self._select_for_query(
@@ -87,6 +95,59 @@ class SkillBankV0:
             for skill in selected
         ]
         dimension_slots = _build_dimension_slots(active, matched_skills, trace)
+        trace["dimension_slot_summary"] = {
+            dimension: slot["status"] for dimension, slot in dimension_slots.items()
+        }
+        return {
+            "matched_skills": matched_skills,
+            "dimension_slots": dimension_slots,
+            "skill_search_trace": trace,
+        }
+
+    def _search_for_explorer_with_abstraction(
+        self,
+        repo: str,
+        issue: str,
+        issue_abstraction: dict[str, Any],
+    ) -> dict[str, Any]:
+        active = self.active_skills()
+        queries = _dimension_queries_from_abstraction(repo, issue, issue_abstraction)
+        selected_by_id: dict[str, DimensionSkill] = {}
+        scores_by_id: dict[str, float] = {}
+        reasons_by_id: dict[str, dict[str, Any]] = {}
+        dimension_traces: dict[str, dict[str, Any]] = {}
+
+        for dimension in DIMENSIONS:
+            query = queries.get(dimension) or query_embedding_text(repo, issue)
+            dimension_active = [skill for skill in active if skill.dimension == dimension]
+            quota = self.max_per_dimension.get(dimension, 1)
+            selected, trace = self._select_for_query(
+                query,
+                dimension_active,
+                max_matched_skills=quota,
+                max_per_dimension={dimension: quota},
+            )
+            dimension_traces[dimension] = trace
+            trace_scores = trace.get("scores", {}) or {}
+            trace_reasons = trace.get("match_reasons", {}) or {}
+            for skill in selected:
+                selected_by_id[skill.skill_id] = skill
+                if skill.skill_id in trace_scores:
+                    scores_by_id[skill.skill_id] = trace_scores[skill.skill_id]
+                if skill.skill_id in trace_reasons:
+                    reasons_by_id[skill.skill_id] = trace_reasons[skill.skill_id]
+
+        selected_skills = _merge_selected_by_quota(
+            list(selected_by_id.values()),
+            max_matched_skills=self.max_matched_skills,
+            max_per_dimension=self.max_per_dimension,
+        )
+        matched_skills = [
+            skill.compact_dict(score=scores_by_id.get(skill.skill_id), match_reasons=reasons_by_id.get(skill.skill_id, {}))
+            for skill in selected_skills
+        ]
+        dimension_slots = _build_dimension_slots(active, matched_skills, _merge_dimension_traces(queries, dimension_traces, selected_skills))
+        trace = _merge_dimension_traces(queries, dimension_traces, selected_skills)
         trace["dimension_slot_summary"] = {
             dimension: slot["status"] for dimension, slot in dimension_slots.items()
         }
@@ -495,6 +556,68 @@ def _merge_hybrid_trace(
         "notes": notes,
         "embedding_trace": embedding_trace,
         "lexical_trace": lexical_trace,
+    }
+
+
+def _dimension_queries_from_abstraction(
+    repo: str,
+    issue: str,
+    issue_abstraction: dict[str, Any],
+) -> dict[str, str]:
+    signature = str(issue_abstraction.get("abstract_problem_signature") or "").strip()
+    return {
+        "general": signature or query_embedding_text(repo, issue),
+        "project_type": str(issue_abstraction.get("project_type_query") or signature or repo).strip(),
+        "fault_mode": str(issue_abstraction.get("fault_mode_query") or signature or issue).strip(),
+        "strategy_type": str(issue_abstraction.get("strategy_type_query") or signature or issue).strip(),
+    }
+
+
+def _merge_dimension_traces(
+    dimension_queries: dict[str, str],
+    dimension_traces: dict[str, dict[str, Any]],
+    selected: list[DimensionSkill],
+) -> dict[str, Any]:
+    candidate_skill_ids: list[str] = []
+    top_scores: list[dict[str, Any]] = []
+    scores: dict[str, float] = {}
+    match_reasons: dict[str, dict[str, Any]] = {}
+    filtered_below_threshold: list[dict[str, Any]] = []
+    notes: list[str] = ["issue_abstraction_used=true"]
+    for dimension, trace in dimension_traces.items():
+        for skill_id in trace.get("candidate_skill_ids") or []:
+            if skill_id not in candidate_skill_ids:
+                candidate_skill_ids.append(skill_id)
+        for item in trace.get("top_scores") or []:
+            if isinstance(item, dict):
+                top_scores.append({"query_dimension": dimension, **item})
+        for skill_id, score in (trace.get("scores") or {}).items():
+            try:
+                scores[skill_id] = max(float(score), float(scores.get(skill_id, 0.0)))
+            except (TypeError, ValueError):
+                scores.setdefault(skill_id, 0.0)
+        for skill_id, reason in (trace.get("match_reasons") or {}).items():
+            if isinstance(reason, dict):
+                match_reasons.setdefault(skill_id, {})[dimension] = reason
+        for item in trace.get("filtered_below_threshold") or []:
+            if isinstance(item, dict):
+                filtered_below_threshold.append({"query_dimension": dimension, **item})
+        for note in trace.get("notes") or []:
+            note_text = f"{dimension}: {note}"
+            if note_text not in notes:
+                notes.append(note_text)
+    return {
+        "query": "\n".join(f"{dimension}: {query}" for dimension, query in dimension_queries.items()),
+        "retrieval_mode": "abstracted_dimension_skill_retrieval_v1",
+        "dimension_queries": dimension_queries,
+        "dimension_traces": dimension_traces,
+        "candidate_skill_ids": candidate_skill_ids,
+        "selected_skill_ids": [skill.skill_id for skill in selected],
+        "top_scores": top_scores[:20],
+        "scores": scores,
+        "match_reasons": match_reasons,
+        "filtered_below_threshold": filtered_below_threshold,
+        "notes": notes,
     }
 
 

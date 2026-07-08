@@ -52,6 +52,18 @@ def test_case_evolution_failure_uses_trajectory_direct_reflector(tmpdir) -> None
     tmp_path = Path(str(tmpdir))
     case_dir = tmp_path / "case"
     _write_case(case_dir, ["wrong.py::symptom"])
+    (case_dir / "issue_abstraction.json").write_text(
+        json.dumps(
+            {
+                "abstract_problem_signature": "A symptom reporter outranks the function that creates the wrong state.",
+                "project_type_query": "small python library with state producer and reporter functions",
+                "fault_mode_query": "incorrect state created before downstream symptom reporting",
+                "strategy_type_query": "rank state producer above downstream symptom reporter",
+                "key_symptoms": ["symptom reporter is related but not causal"],
+            }
+        ),
+        encoding="utf-8",
+    )
     skill_path = tmp_path / "skills.jsonl"
     skill_path.write_text("", encoding="utf-8")
     reflector = {
@@ -112,9 +124,13 @@ def test_case_evolution_failure_uses_trajectory_direct_reflector(tmpdir) -> None
     assert summary["eligible"] is True
     assert summary["outcome"]["label"] == "failure"
     assert summary["updated_skill_ids"]
+    assert summary["issue_abstraction"]["strategy_type_query"] == "rank state producer above downstream symptom reporter"
     assert (case_dir / "case_evolution" / "trajectory_evidence.json").exists()
     assert not (case_dir / "case_evolution" / "insight.json").exists()
     assert len(fake.calls) == 1
+    reflector_payload = json.loads(fake.calls[0]["messages"][1]["content"])
+    assert reflector_payload["issue_abstraction"]["fault_mode_query"] == "incorrect state created before downstream symptom reporting"
+    assert reflector_payload["skill_search_context"]["abstraction_used_for_retrieval"] is True
 
 
 def test_case_evolution_success_can_preserve_existing_skill(tmpdir) -> None:

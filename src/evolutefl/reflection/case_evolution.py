@@ -6,6 +6,7 @@ from typing import Any
 
 from evolutefl.config import resolve_path
 from evolutefl.evaluation import hit_at_k
+from evolutefl.issue_abstraction import fallback_issue_abstraction
 from evolutefl.json_utils import read_json, write_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.skills import make_skill_bank
@@ -71,11 +72,13 @@ def run_case_evolution(
     reflector_prompt = resolve_path(reflection_cfg.get("reflector_prompt_path", "prompt_records/reflection/reflector_skill_v0.txt")).read_text(encoding="utf-8")
     client = llm_client or OpenAICompatibleClient.from_config(config.get("llm", {}))
     bank = make_skill_bank(config)
-    skill_search = bank.search_for_explorer(repo, issue)
+    issue_abstraction = _load_issue_abstraction(case_dir, repo, issue, config)
+    skill_search = bank.search_for_explorer(repo, issue, issue_abstraction=issue_abstraction)
     trajectory_evidence = _build_trajectory_evidence(
         case_dir=case_dir,
         repo=repo,
         issue=issue,
+        issue_abstraction=issue_abstraction,
         result=result,
         trajectory=trajectory,
         outcome=outcome,
@@ -117,6 +120,9 @@ def run_case_evolution(
                 "Assess general, project_type, fault_mode, and strategy_type independently. Each dimension may preserve, "
                 "no_update, update a matched/weak skill, or create a new dimension-level skill."
             ),
+            "issue_abstraction": issue_abstraction,
+            "abstraction_used_for_retrieval": issue_abstraction is not None,
+            "dimension_queries": skill_search.get("skill_search_trace", {}).get("dimension_queries", {}),
             "dimension_slots": skill_search.get("dimension_slots", {}),
             "matched_case_skills": skill_search["matched_skills"],
             "candidate_target_skills": skill_search["matched_skills"],
@@ -132,6 +138,7 @@ def run_case_evolution(
     reflector_output = run_reflector(
         insight=insight,
         trajectory_evidence=None if legacy_insight else trajectory_evidence,
+        issue_abstraction=issue_abstraction,
         skill_search_context=skill_search_context,
         llm_client=client,
         prompt=reflector_prompt,
@@ -149,6 +156,7 @@ def run_case_evolution(
     summary.update(
         {
             "insight": insight,
+            "issue_abstraction": issue_abstraction,
             "trajectory_evidence": trajectory_evidence,
             "reflector_output": reflector_output,
             "dimension_assessment": reflector_output.get("dimension_assessment"),
@@ -174,6 +182,26 @@ def _read_trajectory(path: Path) -> list[dict[str, Any]]:
             if line.strip():
                 records.append(json.loads(line))
     return records
+
+
+def _load_issue_abstraction(
+    case_dir: Path,
+    repo: str,
+    issue: str,
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    abstraction_cfg = config.get("issue_abstraction", {}) or {}
+    if abstraction_cfg.get("enabled", True) is False:
+        return None
+    abstraction_path = case_dir / "issue_abstraction.json"
+    if abstraction_path.exists():
+        try:
+            payload = read_json(abstraction_path)
+            if isinstance(payload, dict):
+                return payload
+        except Exception:  # noqa: BLE001 - old/corrupt run artifacts should not block evolution.
+            pass
+    return fallback_issue_abstraction(repo, issue)
 
 
 def _label_outcome(
@@ -226,6 +254,7 @@ def _build_trajectory_evidence(
     case_dir: Path,
     repo: str,
     issue: str,
+    issue_abstraction: dict[str, Any] | None,
     result: dict[str, Any],
     trajectory: list[dict[str, Any]],
     outcome: dict[str, Any],
@@ -242,6 +271,7 @@ def _build_trajectory_evidence(
             "case_run_dir": str(case_dir),
         },
         "problem_statement": issue,
+        "issue_abstraction": issue_abstraction,
         "outcome": outcome,
         "prediction": {
             "ranked_functions": result.get("ranked_functions", []),

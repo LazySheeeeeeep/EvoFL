@@ -37,6 +37,7 @@ def test_explorer_runs_native_tool_call_smoke(tmpdir) -> None:
     )
     config = {
         "explorer": {"max_steps": 5, "response_retries": 1, "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt"},
+        "issue_abstraction": {"enabled": False},
         "skill_bank": {"path": str(skill_path), "max_matched_skills": 5, "max_per_dimension": {}},
         "assembler": {"max_knowledge_chars": 900, "max_per_dimension": {}},
         "llm": {},
@@ -58,6 +59,68 @@ def test_explorer_runs_native_tool_call_smoke(tmpdir) -> None:
     assert (run_dir / "trajectory.jsonl").exists()
     assert fake.calls[0]["tools"]
     assert any(tool["function"]["name"] == "finish_localization" for tool in fake.calls[0]["tools"])
+
+
+def test_explorer_injects_issue_abstraction_when_enabled(tmpdir) -> None:
+    tmp_path = Path(str(tmpdir))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "bug.py").write_text("def culprit():\n    return 'bad'\n", encoding="utf-8")
+    skill_path = tmp_path / "skills.jsonl"
+    skill_path.write_text("", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    finish_call = {
+        "id": "call_finish",
+        "type": "function",
+        "function": {
+            "name": "finish_localization",
+            "arguments": json.dumps({"ranked_functions": ["bug.py::culprit"], "summary": "Found culprit."}),
+        },
+    }
+    fake = FakeLLMClient(
+        [
+            {
+                "content": json.dumps(
+                    {
+                        "abstract_problem_signature": "A function returns an incorrect value.",
+                        "project_type_query": "small python library",
+                        "fault_mode_query": "wrong return value",
+                        "strategy_type_query": "inspect implementation of reported behavior",
+                        "key_symptoms": ["wrong value returned"],
+                    }
+                )
+            },
+            {"tool_calls": [finish_call], "content": ""},
+        ]
+    )
+    config = {
+        "explorer": {"max_steps": 3, "response_retries": 1, "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt"},
+        "issue_abstraction": {"enabled": True, "prompt_path": "prompt_records/explorer/issue_abstraction_v0.txt"},
+        "skill_bank": {"path": str(skill_path), "max_matched_skills": 5, "max_per_dimension": {}},
+        "assembler": {"max_knowledge_chars": 900, "max_per_dimension": {}},
+        "llm": {},
+    }
+
+    result = run_explorer(
+        task={
+            "instance_id": "demo",
+            "repo_path": str(repo),
+            "repo": "demo/repo",
+            "base_commit": "unknown",
+            "bug_report": "culprit returns bad",
+            "run_dir": str(run_dir),
+        },
+        config=config,
+        llm_client=fake,
+        skill_bank=SkillBankV0(skill_path),
+    )
+
+    initial_payload = json.loads((run_dir / "initial_payload.json").read_text(encoding="utf-8"))
+    assert result["ranked_functions"] == ["bug.py::culprit"]
+    assert initial_payload["issue_abstraction"]["abstract_problem_signature"] == "A function returns an incorrect value."
+    assert (run_dir / "issue_abstraction.json").exists()
+    assert fake.calls[0]["response_format"] == {"type": "json_object"}
+    assert fake.calls[1]["tools"]
 
 
 def test_forced_finish_uses_no_tools_and_json_response_format(tmpdir) -> None:
@@ -94,6 +157,7 @@ def test_forced_finish_uses_no_tools_and_json_response_format(tmpdir) -> None:
             "finalization_steps": 1,
             "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt",
         },
+        "issue_abstraction": {"enabled": False},
         "skill_bank": {"path": str(skill_path), "max_matched_skills": 5, "max_per_dimension": {}},
         "assembler": {"max_knowledge_chars": 900, "max_per_dimension": {}},
         "llm": {},
@@ -145,6 +209,7 @@ def test_unbounded_explorer_uses_runtime_timeout_for_forced_finish(tmpdir) -> No
             "finalization_steps": 0,
             "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt",
         },
+        "issue_abstraction": {"enabled": False},
         "skill_bank": {"path": str(skill_path), "max_matched_skills": 5, "max_per_dimension": {}},
         "assembler": {"max_knowledge_chars": 900, "max_per_dimension": {}},
         "llm": {},
@@ -193,6 +258,7 @@ def test_empty_final_response_exhaustion_forces_finish_instead_of_interrupting(t
             "finalization_steps": 0,
             "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt",
         },
+        "issue_abstraction": {"enabled": False},
         "skill_bank": {"path": str(skill_path), "max_matched_skills": 5, "max_per_dimension": {}},
         "assembler": {"max_knowledge_chars": 900, "max_per_dimension": {}},
         "llm": {},
@@ -245,6 +311,7 @@ def test_empty_forced_finish_uses_deterministic_evidence_fallback(tmpdir) -> Non
             "finalization_steps": 1,
             "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt",
         },
+        "issue_abstraction": {"enabled": False},
         "skill_bank": {"path": str(skill_path), "max_matched_skills": 5, "max_per_dimension": {}},
         "assembler": {"max_knowledge_chars": 900, "max_per_dimension": {}},
         "llm": {},

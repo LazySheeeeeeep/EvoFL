@@ -5,16 +5,27 @@ You read one completed localization run and decide how to update a reusable Skil
 The localization run may include:
 - an issue report
 - repository context
+- an issue abstraction
 - the localization agent's search/read trajectory
 - the final ranked suspicious functions
 - ground-truth patch or changed functions when available
 - currently retrieved skills grouped by dimension
 
+Issue abstraction:
+The input may include an issue_abstraction object with:
+- abstract_problem_signature: an abstract summary of the issue
+- project_type_query: an abstraction of the issue from the project/code-organization dimension
+- fault_mode_query: an abstraction of the issue from the defect-mechanism dimension
+- strategy_type_query: an abstraction of the issue from the localization-strategy dimension
+- key_symptoms: abstract symptoms described by the issue
+
+These fields describe the same issue at a more reusable level. Use them together with the trajectory, final prediction, and patch evidence when deciding whether a skill should be created, updated, preserved, or left unchanged.
+
 A skill is not a tool and not a fixed step-by-step workflow.
 A skill is reusable knowledge that can help a future localization agent decide where to search, what code relationships to compare, and how to rank suspicious functions.
 
 Your task:
-For each skill dimension independently, decide whether this case teaches reusable fault-localization knowledge.
+For each active skill dimension independently, decide whether this case teaches reusable fault-localization knowledge.
 
 Skill dimensions:
 
@@ -36,11 +47,6 @@ Use it when the case teaches how a localization agent should investigate or rank
 Strategy knowledge should guide how to search, inspect, compare, and rank across many projects and fault modes.
 Good strategy knowledge describes an investigation or ranking bias rather than a case-specific command sequence.
 
-general:
-This dimension stores broad fault-localization principles that are useful across project types, fault modes, and strategies.
-Use it when the lesson is genuinely cross-cutting and not better represented by project_type, fault_mode, or strategy_type.
-General knowledge should be rare.
-
 Decision meanings:
 - create_new: create a new dimension-level skill because the lesson is distinct and reusable.
 - update_existing: edit a retrieved skill in the same dimension because it already represents the same fine-grained pattern.
@@ -51,6 +57,7 @@ Writing guidance:
 - Keep each dimension focused on its own responsibility.
 - Write compact reusable knowledge.
 - Prefer causal mechanisms, code-structure priors, investigation biases, ranking biases, and misleading alternatives.
+- Generate target_value, skill.trigger, skill.knowledge, and retrieval_text by considering both the issue abstraction and the concrete trajectory/patch evidence.
 - Concrete file names, function names, line numbers, and instance IDs are case details; skill text should focus on the reusable lesson.
 - For update_existing, edit only one field of one retrieved skill in the same dimension.
 - For create_new, provide title, trigger, retrieval_text, and skill text.
@@ -104,6 +111,7 @@ Edit:
 
 Output rules:
 - Include all four dimensions exactly: general, project_type, fault_mode, strategy_type.
+- Set general to no_update with edit=null unless a later workflow explicitly enables general skills.
 - Use no_update with edit=null when a dimension should not change.
 - For create_new, target_skill_id must be null and edit.operation must be add.
 - For create_new, edit.field must be skill.knowledge.

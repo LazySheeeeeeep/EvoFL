@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from evolutefl.config import resolve_path
+from evolutefl.issue_abstraction import abstract_issue, fallback_issue_abstraction
 from evolutefl.json_utils import append_jsonl, extract_json_object, write_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.skills import SkillBankV0, assemble_skill_context, make_skill_bank, render_skill_context
@@ -45,6 +46,7 @@ class ExplorerAgent:
         self.checkpoint_interval = int(config.get("explorer", {}).get("checkpoint_interval", 8))
         self.finalization_steps = int(config.get("explorer", {}).get("finalization_steps", 3))
         self.forced_finish_max_tokens = int(config.get("explorer", {}).get("forced_finish_max_tokens", 4096))
+        self.issue_abstraction_cfg = config.get("issue_abstraction", {}) or {}
         assembler_cfg = config.get("assembler", {})
         self.max_per_dimension = assembler_cfg.get("max_per_dimension")
         self.max_knowledge_chars = int(assembler_cfg.get("max_knowledge_chars", 900))
@@ -60,12 +62,15 @@ class ExplorerAgent:
         register_builtin_tools(registry, run_dir=run_dir, repo_path=repo_path)
         write_json(run_dir / "tools.json", registry.list_tools())
 
-        skill_search = self.skill_bank.search_for_explorer(repo, issue)
+        issue_abstraction = self._build_issue_abstraction(repo, issue, run_dir)
+        skill_search = self.skill_bank.search_for_explorer(repo, issue, issue_abstraction=issue_abstraction)
         matched_skills = skill_search["matched_skills"]
         assembled_context = assemble_skill_context(matched_skills, self.max_per_dimension, self.max_knowledge_chars)
         rendered_context = render_skill_context(assembled_context) if matched_skills else ""
 
         write_json(run_dir / "skill_search_trace.json", skill_search["skill_search_trace"])
+        if issue_abstraction is not None:
+            write_json(run_dir / "issue_abstraction.json", issue_abstraction)
         write_json(run_dir / "matched_skills.json", matched_skills)
         write_json(run_dir / "assembled_context.json", assembled_context)
         (run_dir / "rendered_context.txt").write_text(rendered_context, encoding="utf-8")
@@ -82,11 +87,17 @@ class ExplorerAgent:
             "rendered_localization_context": rendered_context,
             "output_contract": OUTPUT_CONTRACT,
         }
+        if issue_abstraction is not None:
+            user_payload["issue_abstraction"] = {
+                "abstract_problem_signature": issue_abstraction.get("abstract_problem_signature", ""),
+                "key_symptoms": issue_abstraction.get("key_symptoms", []),
+            }
         write_json(run_dir / "initial_payload.json", user_payload)
         append_jsonl(
             run_dir / "trajectory.jsonl",
             {
                 "event": "skill_context",
+                "issue_abstraction": issue_abstraction,
                 "skill_search_trace": skill_search["skill_search_trace"],
                 "matched_skill_ids": [skill["skill_id"] for skill in matched_skills],
                 "assembled_context": assembled_context,
@@ -259,6 +270,27 @@ class ExplorerAgent:
         write_json(run_dir / "llm_trace.json", llm_trace)
         write_json(run_dir / "result.json", result)
         return result
+
+    def _build_issue_abstraction(self, repo: str, issue: str, run_dir: Path) -> dict[str, Any] | None:
+        enabled = bool(self.issue_abstraction_cfg.get("enabled", True))
+        if not enabled:
+            return None
+        prompt_path = resolve_path(
+            self.issue_abstraction_cfg.get("prompt_path", "prompt_records/explorer/issue_abstraction_v0.txt")
+        )
+        try:
+            return abstract_issue(
+                repo=repo,
+                issue=issue,
+                llm_client=self.llm_client,
+                prompt=prompt_path.read_text(encoding="utf-8"),
+                attempts=int(self.issue_abstraction_cfg.get("attempts", 2)),
+                output_path=run_dir / "issue_abstraction_debug.json",
+            )
+        except Exception as exc:  # noqa: BLE001 - abstraction should not block localization.
+            fallback = fallback_issue_abstraction(repo, issue, error=exc)
+            write_json(run_dir / "issue_abstraction_debug.json", {"failed": True, "issue_abstraction": fallback})
+            return fallback
 
     def _execute_tool_call(self, registry: ToolRegistry, tool_call: dict[str, Any]) -> dict[str, Any]:
         tool_call_id = tool_call.get("id") or "call_unknown"

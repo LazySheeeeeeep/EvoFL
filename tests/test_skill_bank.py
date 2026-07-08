@@ -58,6 +58,28 @@ def test_search_threshold_can_reject_weak_match(tmpdir) -> None:
     assert result["dimension_slots"]["fault_mode"]["weak_candidates"][0]["skill_id"] == "config_schema_v1"
 
 
+def test_search_for_explorer_can_use_issue_abstraction_dimension_query(tmpdir) -> None:
+    tmp_path = Path(str(tmpdir))
+    bank_path = tmp_path / "skills.jsonl"
+    write_seed(bank_path)
+    bank = SkillBankV0(bank_path, min_score=4.0)
+    result = bank.search_for_explorer(
+        "demo/repo",
+        "The concrete issue text does not share useful words.",
+        issue_abstraction={
+            "abstract_problem_signature": "configured option ignored before downstream use",
+            "project_type_query": "configuration pipeline repository",
+            "fault_mode_query": "config schema option normalization default merge",
+            "strategy_type_query": "trace option propagation to downstream consumer",
+            "key_symptoms": ["configured option ignored"],
+        },
+    )
+
+    assert result["matched_skills"][0]["skill_id"] == "config_schema_v1"
+    assert result["skill_search_trace"]["retrieval_mode"] == "abstracted_dimension_skill_retrieval_v1"
+    assert result["skill_search_trace"]["dimension_queries"]["fault_mode"] == "config schema option normalization default merge"
+
+
 def test_apply_update_create_replace_delete_and_preserve(tmpdir) -> None:
     tmp_path = Path(str(tmpdir))
     bank_path = tmp_path / "skills.jsonl"
