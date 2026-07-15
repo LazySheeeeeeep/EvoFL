@@ -15,7 +15,7 @@ from .embedding_store import (
     select_embedding_skills,
 )
 from .retrieval import DEFAULT_DIMENSION_QUOTA, select_skills
-from .schema import DIMENSIONS, DimensionSkill, build_retrieval_text, slugify, utc_now
+from .schema import DIMENSIONS, DimensionSkill, build_retrieval_text, slugify
 
 
 class SkillBankV0:
@@ -349,33 +349,19 @@ class SkillBankV0:
             raise ValueError("add edit requires content.text for new skill.")
         title = str(content.get("title") or _title_from_value(value))
         trigger = str(content.get("trigger") or f"Use when the issue matches {value.replace('_', ' ')} localization patterns.")
-        anti_patterns = _as_list(content.get("anti_patterns"))
-        retrieval_text = str(
-            content.get("retrieval_text")
-            or build_retrieval_text(title, trigger, text, anti_patterns, dimension, value)
-        )
+        retrieval_text = str(content.get("retrieval_text") or build_retrieval_text(title, trigger, dimension, value))
         existing = self.load()
         skill_id = _unique_skill_id(existing, f"{dimension}_{value}_v1")
-        now = utc_now()
-        provenance = _provenance_from_edit(edit, created_at=now, updated_at=now)
         skill = DimensionSkill(
             skill_id=skill_id,
             status="active",
             version=1,
             dimension=dimension,
             value=value,
-            taxonomy=_taxonomy_for_dimension(dimension, value),
             retrieval_text=retrieval_text,
             title=title,
             trigger=trigger,
             knowledge=text,
-            anti_patterns=anti_patterns,
-            supported_by_cases=provenance["supported_by_cases"],
-            supported_by_successes=provenance["supported_by_successes"],
-            supported_by_failures=provenance["supported_by_failures"],
-            created_at=now,
-            updated_at=now,
-            edit_history=provenance["edit_history"],
         )
         records = read_jsonl(self.path)
         records.append(skill.to_dict())
@@ -398,26 +384,14 @@ class SkillBankV0:
 
         new_skill = deepcopy(old)
         new_skill.version = old.version + 1
-        new_skill.updated_at = utc_now()
-        new_skill.parent_skill_id = old.skill_id
-        new_skill.supersedes = old.skill_id
         field = str(target.get("field") or "skill.knowledge")
         operation = str(edit.get("operation"))
         _apply_text_edit(new_skill, field, operation, edit.get("content") or {})
-        _merge_provenance(new_skill, edit)
         if not new_skill.retrieval_text:
-            new_skill.retrieval_text = build_retrieval_text(
-                new_skill.title,
-                new_skill.trigger,
-                new_skill.knowledge,
-                new_skill.anti_patterns,
-                new_skill.dimension,
-                new_skill.value,
-            )
+            new_skill.retrieval_text = build_retrieval_text(new_skill.title, new_skill.trigger, new_skill.dimension, new_skill.value)
 
         superseded = deepcopy(old)
         superseded.status = "superseded"
-        superseded.updated_at = new_skill.updated_at
 
         records = read_jsonl(self.path)
         records.append(superseded.to_dict())
@@ -439,24 +413,11 @@ class SkillBankV0:
         old = {skill.skill_id: skill for skill in self.active_skills()}.get(target_skill_id)
         if not old:
             return {"action": "preserve", "updated_skill_id": None, "reason": "target skill not active"}
-        new_skill = deepcopy(old)
-        new_skill.version = old.version + 1
-        new_skill.updated_at = utc_now()
-        new_skill.parent_skill_id = old.skill_id
-        new_skill.supersedes = old.skill_id
-        _merge_provenance(new_skill, edit)
-        superseded = deepcopy(old)
-        superseded.status = "superseded"
-        superseded.updated_at = new_skill.updated_at
-        records = read_jsonl(self.path)
-        records.append(superseded.to_dict())
-        records.append(new_skill.to_dict())
-        write_jsonl(self.path, records)
         return {
             "action": "preserve",
-            "updated_skill_id": new_skill.skill_id,
-            "version": new_skill.version,
-            "embedding_cache": self._warm_embedding_for_skill(new_skill),
+            "updated_skill_id": old.skill_id,
+            "version": old.version,
+            "embedding_cache": {"enabled": False, "reason": "preserve does not change skill text"},
         }
 
     def _warm_embedding_for_skill(self, skill: DimensionSkill) -> dict[str, Any]:
@@ -621,13 +582,6 @@ def _merge_dimension_traces(
     }
 
 
-def _taxonomy_for_dimension(dimension: str, value: str) -> dict[str, str]:
-    taxonomy = {"project_type": "unknown", "fault_mode": "unknown", "strategy_type": "unknown"}
-    if dimension in taxonomy:
-        taxonomy[dimension] = value
-    return taxonomy
-
-
 def _apply_text_edit(skill: DimensionSkill, field: str, operation: str, content: dict[str, Any]) -> None:
     text = str(content.get("text") or "").strip()
     old_text = str(content.get("old_text") or "").strip()
@@ -638,8 +592,6 @@ def _apply_text_edit(skill: DimensionSkill, field: str, operation: str, content:
         skill.trigger = _edit_string(skill.trigger, operation, text=text, old_text=old_text, new_text=new_text)
     elif field == "retrieval_text":
         skill.retrieval_text = _edit_string(skill.retrieval_text, operation, text=text, old_text=old_text, new_text=new_text)
-    elif field == "skill.anti_patterns":
-        skill.anti_patterns = _edit_list(skill.anti_patterns, operation, text=text, old_text=old_text, new_text=new_text)
     else:
         raise ValueError(f"Unsupported edit target field: {field!r}")
 
@@ -664,65 +616,6 @@ def _edit_string(current: str, operation: str, *, text: str, old_text: str, new_
             raise ValueError("delete edit text was not found in target.")
         return current.replace(target, "").strip()
     raise ValueError(f"Unsupported string operation: {operation!r}")
-
-
-def _edit_list(current: list[str], operation: str, *, text: str, old_text: str, new_text: str) -> list[str]:
-    if operation == "add":
-        addition = text or new_text
-        if not addition:
-            raise ValueError("add anti-pattern edit requires text.")
-        return list(dict.fromkeys(current + [addition]))
-    if operation == "replace":
-        source = old_text or text
-        replacement = new_text or text
-        return [replacement if item == source else item for item in current]
-    if operation == "delete":
-        target = text or old_text
-        return [item for item in current if item != target]
-    raise ValueError(f"Unsupported list operation: {operation!r}")
-
-
-def _provenance_from_edit(edit: dict[str, Any], *, created_at: str, updated_at: str) -> dict[str, Any]:
-    source_cases = _as_list(edit.get("source_cases") or edit.get("supported_by_cases"))
-    outcome = str(edit.get("outcome_type") or "")
-    return {
-        "supported_by_cases": source_cases,
-        "supported_by_successes": source_cases if outcome == "success" else [],
-        "supported_by_failures": source_cases if outcome == "failure" else [],
-        "created_at": created_at,
-        "updated_at": updated_at,
-        "edit_history": [_edit_history_entry(edit)],
-    }
-
-
-def _merge_provenance(skill: DimensionSkill, edit: dict[str, Any]) -> None:
-    source_cases = _as_list(edit.get("source_cases") or edit.get("supported_by_cases"))
-    outcome = str(edit.get("outcome_type") or "")
-    skill.supported_by_cases = list(dict.fromkeys(skill.supported_by_cases + source_cases))
-    if outcome == "success":
-        skill.supported_by_successes = list(dict.fromkeys(skill.supported_by_successes + source_cases))
-    if outcome == "failure":
-        skill.supported_by_failures = list(dict.fromkeys(skill.supported_by_failures + source_cases))
-    skill.edit_history = list(skill.edit_history) + [_edit_history_entry(edit)]
-
-
-def _edit_history_entry(edit: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "operation": edit.get("operation"),
-        "rationale": edit.get("rationale", ""),
-        "evidence": edit.get("evidence", []),
-        "risk": edit.get("risk", ""),
-        "source_cases": _as_list(edit.get("source_cases") or edit.get("supported_by_cases")),
-        "outcome_type": edit.get("outcome_type", ""),
-    }
-
-
-def _as_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item)]
-    return [str(value)] if str(value) else []
 
 
 def _title_from_value(value: str) -> str:

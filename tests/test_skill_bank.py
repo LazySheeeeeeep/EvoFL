@@ -20,9 +20,7 @@ def write_seed(path: Path) -> None:
                     "title": "Config schema mismatch",
                     "trigger": "Use for config schema mismatches.",
                     "knowledge": "Config mismatches often originate at schema normalization, option merge, or default handling boundaries.",
-                    "anti_patterns": ["Do not rank downstream consumers before checking config normalization."],
                 },
-                "provenance": {"supported_by_cases": ["seed"], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
             },
             separators=(",", ":"),
         )
@@ -154,9 +152,7 @@ def test_active_skills_keep_only_latest_record_per_skill_id(tmpdir) -> None:
                 "title": "Old",
                 "trigger": "old trigger",
                 "knowledge": "old knowledge",
-                "anti_patterns": [],
             },
-            "provenance": {"supported_by_cases": []},
         },
         {
             "skill_id": "duplicate_v1",
@@ -169,9 +165,7 @@ def test_active_skills_keep_only_latest_record_per_skill_id(tmpdir) -> None:
                 "title": "Old",
                 "trigger": "old trigger",
                 "knowledge": "old knowledge",
-                "anti_patterns": [],
             },
-            "provenance": {"supported_by_cases": []},
         },
         {
             "skill_id": "duplicate_v1",
@@ -184,9 +178,7 @@ def test_active_skills_keep_only_latest_record_per_skill_id(tmpdir) -> None:
                 "title": "New",
                 "trigger": "new trigger",
                 "knowledge": "new knowledge",
-                "anti_patterns": [],
             },
-            "provenance": {"supported_by_cases": []},
         },
     ]
     bank_path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")

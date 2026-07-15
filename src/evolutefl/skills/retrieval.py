@@ -49,8 +49,6 @@ def skill_text(skill: DimensionSkill) -> str:
         skill.title,
         skill.trigger,
         skill.knowledge,
-        *skill.anti_patterns,
-        *skill.taxonomy.values(),
     ]
     return " ".join(parts)
 
@@ -77,14 +75,6 @@ def score_skill(query_text: str, skill: DimensionSkill) -> tuple[float, dict[str
     if retrieval_tokens.intersection(query_tokens):
         score += 1.0
         bonuses.append("retrieval_text")
-    anti_tokens = set(tokenize(" ".join(skill.anti_patterns)))
-    if anti_tokens.intersection(query_tokens):
-        score += 0.5
-        bonuses.append("anti_patterns")
-    for tax_value in skill.taxonomy.values():
-        if tax_value != "unknown" and tax_value.lower() in lower_query:
-            score += 2.0
-            bonuses.append(f"taxonomy:{tax_value}")
     return score, {"overlap_tokens": overlap_tokens, "bonuses": bonuses}
 
 

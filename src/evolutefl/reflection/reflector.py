@@ -9,7 +9,7 @@ from evolutefl.skills.schema import DIMENSIONS
 
 
 EDIT_OPERATIONS = ("add", "replace", "delete", "preserve")
-EDIT_FIELDS = ("skill.knowledge", "skill.trigger", "skill.anti_patterns", "retrieval_text")
+EDIT_FIELDS = ("skill.knowledge", "skill.trigger", "retrieval_text")
 UPDATE_DECISIONS = ("update_existing", "create_new", "no_update", "preserve_existing")
 LEARNABLE_LEVELS = ("none", "weak", "strong")
 
@@ -352,8 +352,6 @@ def _current_target_text(target: dict[str, Any], candidate_skills: dict[str, dic
         return str(skill.get("trigger") or "")
     if field == "retrieval_text":
         return str(skill.get("retrieval_text") or "")
-    if field == "skill.anti_patterns":
-        return "\n".join(str(item) for item in skill.get("anti_patterns", []) or [])
     raise ValueError(f"Unsupported edit target field: {field!r}")
 
 

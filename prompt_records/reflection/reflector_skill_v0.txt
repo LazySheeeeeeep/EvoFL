@@ -71,11 +71,15 @@ Writing guidance:
 - target_value should be a reusable pattern name, not a project-specific label.
 - Use concrete case details to reason, then abstract them before writing persisted skill fields.
 - Concrete names may appear in rationale when useful, because rationale is an audit note rather than the reusable skill body.
+- Persisted skill fields are skill.knowledge, skill.trigger, retrieval_text, title, and target_value.
+- Persisted skill fields should not contain concrete project symbols such as file paths, class names, function names, test names, line numbers, package-specific helper names, or instance IDs.
+- retrieval_text should be short abstract retrieval language: symptoms, mechanism phrases, architecture phrases, and strategy phrases. It should not be a grep query and should not list concrete code symbols.
+- skill.knowledge should be one abstract paragraph. It should not be a numbered checklist, a sequence of steps, a case summary, or a collection of several loosely related sub-patterns.
+- If a case suggests multiple distinct reusable patterns inside one dimension, choose the primary pattern for this update and leave the rest for future cases.
 
 Editable fields:
 - skill.knowledge
 - skill.trigger
-- skill.anti_patterns
 - retrieval_text
 
 Return exactly one JSON object with this top-level shape:
@@ -107,15 +111,14 @@ Edit:
 
 {
   "operation": "add | replace | delete | preserve",
-  "field": "skill.knowledge | skill.trigger | skill.anti_patterns | retrieval_text",
+  "field": "skill.knowledge | skill.trigger | retrieval_text",
   "content": {
     "text": "string",
     "old_text": "string or null",
     "new_text": "string or null",
     "title": "string or null",
     "trigger": "string or null",
-    "retrieval_text": "string or null",
-    "anti_patterns": []
+    "retrieval_text": "string or null"
   }
 }
 

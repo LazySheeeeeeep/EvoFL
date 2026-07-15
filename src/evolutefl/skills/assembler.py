@@ -44,12 +44,10 @@ def assemble_skill_context(
                 "title": skill.get("title", ""),
                 "trigger": skill.get("trigger", ""),
                 "knowledge": knowledge,
-                "anti_patterns": skill.get("anti_patterns", []) or [],
                 "source_skill_id": skill_id,
                 "dimension": dimension,
                 "value": skill.get("value", "unknown"),
-                "score": skill.get("score", 0.0),
-                "provenance": skill.get("provenance", {}),
+                "retrieval_text": skill.get("retrieval_text", ""),
             }
         )
 
@@ -73,9 +71,6 @@ def render_skill_context(assembled_context: dict[str, Any]) -> str:
         for skill in skills:
             title = skill.get("title") or skill.get("source_skill_id") or "Untitled skill"
             lines.append(f"- [{title}] {skill.get('knowledge', '')}")
-            anti_patterns = skill.get("anti_patterns") or []
-            if anti_patterns:
-                lines.append(f"  Anti-patterns: {'; '.join(str(item) for item in anti_patterns)}")
     lines.append("")
     lines.append("Important:")
     lines.append("- These skills are reusable localization knowledge, not a mandatory workflow.")

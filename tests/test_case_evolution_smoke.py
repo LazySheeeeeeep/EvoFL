@@ -151,9 +151,7 @@ def test_case_evolution_success_can_preserve_existing_skill(tmpdir) -> None:
                     "title": "Root cause ranking",
                     "trigger": "Use when symptom reporter functions outrank likely state producers.",
                     "knowledge": "Rank evidence-supported root causes above symptom reporters.",
-                    "anti_patterns": [],
                 },
-                "provenance": {"supported_by_cases": [], "supported_by_successes": [], "supported_by_failures": [], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
             }
         )
         + "\n",

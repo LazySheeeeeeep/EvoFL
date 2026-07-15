@@ -37,6 +37,14 @@ def main(argv: list[str] | None = None) -> int:
         else select_cases(args.sample_size, args.seed, args.dataset_name, args.split, args.prefer_local_images)
     )
     write_json(out_dir / "selected_cases.json", cases)
+    previous_by_id: dict[str, dict[str, Any]] = {}
+    if args.resume and (out_dir / "progress_summary.json").exists():
+        previous = json.loads((out_dir / "progress_summary.json").read_text(encoding="utf-8"))
+        previous_by_id = {
+            item["instance_id"]: item
+            for item in previous.get("cases", [])
+            if isinstance(item, dict) and item.get("instance_id")
+        }
     if args.prepare_only:
         prepared = []
         for case in cases:
@@ -61,6 +69,16 @@ def main(argv: list[str] | None = None) -> int:
     summaries: list[dict[str, Any]] = []
     for index, case in enumerate(cases, start=1):
         instance_id = case["instance_id"]
+        previous_summary = previous_by_id.get(instance_id)
+        if (
+            args.resume
+            and previous_summary
+            and previous_summary.get("explorer_status") == "completed"
+            and previous_summary.get("evolution_status") == "completed"
+        ):
+            summaries.append(previous_summary)
+            write_json(out_dir / "progress_summary.json", {"cases": summaries})
+            continue
         case_dir = out_dir / "cases" / instance_id
         repo_dir = out_dir / "repos" / _safe_name(case["image_name"])
         case_dir.mkdir(parents=True, exist_ok=True)
@@ -163,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embedding-base-url")
     parser.add_argument("--embedding-min-score", type=float)
     parser.add_argument("--rebuild-embeddings-after-case", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Skip cases already completed in progress_summary.json.")
     return parser
 
 

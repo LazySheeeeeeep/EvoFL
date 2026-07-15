@@ -41,9 +41,7 @@ def _write_skill(path: Path) -> None:
                     "title": "Config schema mismatch",
                     "trigger": "Use for config schema mismatch.",
                     "knowledge": "Inspect config schema normalization before downstream consumers.",
-                    "anti_patterns": [],
                 },
-                "provenance": {"supported_by_cases": []},
             }
         )
         + "\n",
@@ -118,8 +116,6 @@ def test_skill_embedding_text_uses_compact_retrieval_view() -> None:
             title="Config schema mismatch",
             trigger="Use for config schema mismatch.",
             knowledge="Very long case-specific knowledge that should be loaded after retrieval, not embedded.",
-            anti_patterns=["Avoid downstream consumers first."],
-            taxonomy={"fault_mode": "config_schema_mismatch"},
         )
     )
 
@@ -177,9 +173,7 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
                 "title": "Old config schema",
                 "trigger": "Use for old config schema bugs.",
                 "knowledge": "Old knowledge.",
-                "anti_patterns": [],
             },
-            "provenance": {"supported_by_cases": []},
         },
         {
             "skill_id": "config_schema_v1",
@@ -192,9 +186,7 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
                 "title": "New config schema",
                 "trigger": "Use for new config schema bugs.",
                 "knowledge": "New knowledge.",
-                "anti_patterns": [],
             },
-            "provenance": {"supported_by_cases": []},
         },
     ]
     bank_path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")

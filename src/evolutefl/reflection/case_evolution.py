@@ -147,10 +147,22 @@ def run_case_evolution(
     write_json(out_dir / "reflector_output.json", reflector_output)
 
     applied_edits: list[dict[str, Any]] = []
+    failed_edits: list[dict[str, Any]] = []
     for edit in reflector_output.get("materialized_edits", []):
-        applied = bank.apply_update(edit)
-        applied_edits.append(applied)
+        try:
+            applied = bank.apply_update(edit)
+            applied_edits.append(applied)
+        except Exception as exc:  # noqa: BLE001 - keep exact edit semantics but isolate bad edits.
+            failed_edits.append(
+                {
+                    "edit_id": edit.get("edit_id"),
+                    "operation": edit.get("operation"),
+                    "target": edit.get("target"),
+                    "error": str(exc),
+                }
+            )
     write_json(out_dir / "applied_edits.json", applied_edits)
+    write_json(out_dir / "failed_edits.json", failed_edits)
     write_json(out_dir / "skill_bank_delta.json", applied_edits)
 
     summary.update(
@@ -162,6 +174,7 @@ def run_case_evolution(
             "dimension_assessment": reflector_output.get("dimension_assessment"),
             "dimension_updates": reflector_output.get("dimension_updates"),
             "applied_edits": applied_edits,
+            "failed_edits": failed_edits,
             "outcome_type": outcome.get("label"),
             "updated_skill_ids": [item.get("updated_skill_id") for item in applied_edits if item.get("updated_skill_id")],
             "updated_dimensions": _updated_dimensions_from_edits(reflector_output.get("materialized_edits", [])),

@@ -26,7 +26,23 @@ def test_new_schema_parse_to_dict() -> None:
     assert "filtered" in skill.knowledge
     saved = skill.to_dict()
     assert "items" not in saved["skill"]
-    assert saved["skill"]["anti_patterns"] == ["Do not rank only the final reporter."]
+    assert "anti_patterns" not in saved["skill"]
+    assert "provenance" not in saved
+    compact = skill.compact_dict(score=0.7, match_reasons={"embedding_score": 0.7})
+    assert compact == {
+        "skill_id": "fault_missing_data_v1",
+        "dimension": "fault_mode",
+        "value": "missing_data",
+        "retrieval_text": "missing data none empty value",
+        "title": "Missing data localization",
+        "trigger": "Use when data is dropped.",
+        "knowledge": "Missing-data bugs often originate where values are filtered, defaulted, or converted.",
+    }
+    assert "taxonomy" not in compact
+    assert "provenance" not in compact
+    assert "anti_patterns" not in compact
+    assert "score" not in compact
+    assert "match_reasons" not in compact
 
 
 def test_legacy_migration_merges_guidance_items_into_knowledge() -> None:
@@ -47,7 +63,9 @@ def test_legacy_migration_merges_guidance_items_into_knowledge() -> None:
     assert skill.dimension == "project_type"
     assert "Inspect legacy guidance." in skill.knowledge
     assert "Rank producer above reporter." in skill.knowledge
-    assert skill.anti_patterns == ["Avoid keyword-only ranking."]
+    saved = skill.to_dict()
+    assert "anti_patterns" not in saved["skill"]
+    assert "taxonomy" not in saved
 
 
 def test_invalid_dimension_rejected() -> None:
