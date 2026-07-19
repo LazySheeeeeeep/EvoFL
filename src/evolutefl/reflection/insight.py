@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from evolutefl.json_utils import extract_json_object, write_json
-from evolutefl.skills.schema import DIMENSIONS
+from evolutefl.skills.schema import SKILL_TYPES
 
 
 def build_insight(
@@ -43,11 +43,11 @@ def validate_insight(payload: dict[str, Any]) -> dict[str, Any]:
     outcome_type = analysis.get("outcome_type", "failure")
     if outcome_type not in ("success", "failure"):
         raise ValueError(f"Invalid outcome_type: {outcome_type!r}")
-    dimension = analysis.get("missing_or_reinforced_dimension") or analysis.get("missing_dimension")
-    if dimension not in DIMENSIONS:
-        raise ValueError(f"Invalid missing_or_reinforced_dimension: {dimension!r}")
+    skill_type = analysis.get("missing_or_reinforced_skill_type")
+    if skill_type not in SKILL_TYPES:
+        raise ValueError(f"Invalid missing_or_reinforced_skill_type: {skill_type!r}")
     analysis["outcome_type"] = outcome_type
-    analysis["missing_or_reinforced_dimension"] = dimension
+    analysis["missing_or_reinforced_skill_type"] = skill_type
     for key in ("miss_or_success_reason", "patch_lesson", "target_value_hint", "transferable_lesson"):
         analysis.setdefault(key, "")
     if "miss_reason" in analysis and not analysis["miss_or_success_reason"]:

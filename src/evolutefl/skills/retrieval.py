@@ -4,14 +4,12 @@ import re
 from collections import Counter, defaultdict
 from typing import Any
 
-from .schema import DIMENSIONS, DimensionSkill
+from .schema import SKILL_TYPES, DimensionSkill
 
 
-DEFAULT_DIMENSION_QUOTA = {
-    "general": 1,
-    "project_type": 1,
-    "fault_mode": 2,
-    "strategy_type": 1,
+DEFAULT_SKILL_TYPE_QUOTA = {
+    "project_skill": 1,
+    "strategy_skill": 1,
 }
 
 STOPWORDS = {
@@ -43,7 +41,7 @@ def tokenize(text: str) -> list[str]:
 def skill_text(skill: DimensionSkill) -> str:
     parts = [
         skill.skill_id,
-        skill.dimension,
+        skill.skill_type,
         skill.value,
         skill.retrieval_text,
         skill.title,
@@ -83,11 +81,11 @@ def select_skills(
     skills: list[DimensionSkill],
     *,
     max_matched_skills: int = 5,
-    max_per_dimension: dict[str, int] | None = None,
+    max_per_skill_type: dict[str, int] | None = None,
     min_score: float = 4.0,
-    project_type_min_score: float = 6.0,
+    project_skill_min_score: float = 6.0,
 ) -> tuple[list[DimensionSkill], dict[str, Any]]:
-    quotas = {**DEFAULT_DIMENSION_QUOTA, **(max_per_dimension or {})}
+    quotas = {**DEFAULT_SKILL_TYPE_QUOTA, **(max_per_skill_type or {})}
     scored = []
     match_reasons: dict[str, dict[str, Any]] = {}
     for skill in skills:
@@ -97,33 +95,33 @@ def select_skills(
     candidates = []
     filtered: list[dict[str, Any]] = []
     for score, skill in scored:
-        threshold = project_type_min_score if skill.dimension == "project_type" else min_score
+        threshold = project_skill_min_score if skill.skill_type == "project_skill" else min_score
         if score >= threshold:
             candidates.append((score, skill))
         elif score > 0:
             filtered.append({"skill_id": skill.skill_id, "score": score, "threshold": threshold})
-    candidates.sort(key=lambda pair: (-pair[0], pair[1].dimension, pair[1].skill_id))
+    candidates.sort(key=lambda pair: (-pair[0], pair[1].skill_type, pair[1].skill_id))
 
     selected: list[DimensionSkill] = []
-    used_by_dimension: dict[str, int] = defaultdict(int)
+    used_by_skill_type: dict[str, int] = defaultdict(int)
     for score, skill in candidates:
-        dimension = skill.dimension if skill.dimension in DIMENSIONS else "general"
-        if used_by_dimension[dimension] >= quotas.get(dimension, 1):
+        skill_type = skill.skill_type
+        if skill_type not in SKILL_TYPES or used_by_skill_type[skill_type] >= quotas.get(skill_type, 1):
             continue
         selected.append(skill)
-        used_by_dimension[dimension] += 1
+        used_by_skill_type[skill_type] += 1
         if len(selected) >= max_matched_skills:
             break
 
     trace = {
         "query": query_text,
-        "retrieval_mode": "lexical_dimension_skill_retrieval_v1",
+        "retrieval_mode": "lexical_skill_type_retrieval_v1",
         "candidate_skill_ids": [skill.skill_id for _, skill in candidates],
         "selected_skill_ids": [skill.skill_id for skill in selected],
         "scores": {skill.skill_id: score for score, skill in candidates},
         "match_reasons": {skill.skill_id: match_reasons.get(skill.skill_id, {}) for _, skill in candidates},
         "filtered_below_threshold": filtered,
-        "notes": [f"min_score={min_score}, project_type_min_score={project_type_min_score}"],
+        "notes": [f"min_score={min_score}, project_skill_min_score={project_skill_min_score}"],
     }
     if not selected:
         trace["notes"].append("No lexical skill match found.")

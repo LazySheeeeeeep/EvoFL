@@ -4,23 +4,21 @@ EvoluteFL is a skill-centric function-level fault localization prototype.
 Explorer uses a fixed toolset: `grep`, `read_file`, and `write`.
 Tools are not evolved.
 
-EvoluteFL uses dimension-level localization skills.
+EvoluteFL uses two types of localization skills.
 A skill is not an executable workflow.
-A skill is a reusable natural-language localization knowledge fragment associated with one dimension.
+A skill is a reusable natural-language knowledge fragment for understanding a software system or narrowing the localization search space.
 
-## Skill Dimensions
+## Skill Types
 
-- `project_type`: project structure priors, common modules, entrypoints, boundaries, and intermediate representations.
-- `fault_mode`: fault mechanisms, likely root-cause shapes, symptom patterns, and misleading locations.
-- `strategy_type`: evidence interpretation strategies, candidate comparison, working/failing path contrast, caller/callee contrast, and symptom/cause distinction.
-- `general`: general FL principles, root-cause ranking principles, and anti-misleading rules.
+- `project_skill`: reusable system-model fragments covering repository organization, component roles, functional relationships, and implementation boundaries.
+- `strategy_skill`: reusable diagnostic policies covering evidence collection, tracing, comparison, hypothesis evaluation, and suspicious-function ranking.
 
 ## Runtime Flow
 
 ```text
 Case
--> dimension-aware skill retrieval
--> simple dimension-based context assembly
+-> project/strategy skill retrieval
+-> two-type context assembly
 -> Explorer with fixed tools
 -> ranked functions
 ```
@@ -47,7 +45,7 @@ Non-completed system failures are skipped unless `--force` is used.
 Reflector consumes Explorer trajectory evidence directly, inspired by SkillOpt's trajectory-driven reflection style.
 The legacy Insight path is still available with `--legacy-insight`.
 
-Reflector edits dimension-level skill text such as `skill.knowledge`, `skill.trigger`, `skill.anti_patterns`, or `retrieval_text`.
+Reflector evaluates project and strategy knowledge independently, then edits `skill.knowledge`, `skill.trigger`, or `retrieval_text`.
 It does not create stages, workflows, tools, or prompt updates.
 
 ## CLI Examples

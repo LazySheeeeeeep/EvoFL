@@ -32,7 +32,6 @@ def build_compacted_trajectory(
     return {
         "trajectory_summary": summary,
         "trajectory_timeline": [_timeline_event(event) for event in summary],
-        "raw_trajectory": selected,
         "tool_call_statistics": _tool_call_statistics(trajectory),
         "trajectory_compaction": compaction,
     }
@@ -85,7 +84,13 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
         entry["content_preview"] = _clip_observation(event.get("content", ""))
     elif kind == "finish":
         entry["details"] = _clip_mapping({key: value for key, value in event.items() if key != "event"}, FIELD_LIMITS["finish"])
-    elif kind in ("forced_finish", "response_repair", "decision_checkpoint", "finalization_mode", "skill_context"):
+    elif kind == "skill_context":
+        entry["details"] = {
+            "issue_abstraction": _clip_mapping(event.get("issue_abstraction") or {}, FIELD_LIMITS["details"]),
+            "matched_skill_ids": [str(item) for item in event.get("matched_skill_ids", []) or []],
+            "assembled_context": _clip_mapping(event.get("assembled_context") or {}, FIELD_LIMITS["details"]),
+        }
+    elif kind in ("forced_finish", "response_repair", "decision_checkpoint", "finalization_mode"):
         entry["details"] = _clip_mapping({key: value for key, value in event.items() if key != "event"}, FIELD_LIMITS["details"])
     else:
         entry["details"] = _clip_mapping({key: value for key, value in event.items() if key != "event"}, FIELD_LIMITS["details"])

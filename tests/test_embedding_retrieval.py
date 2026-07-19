@@ -31,11 +31,12 @@ def _write_skill(path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "skill_id": "config_schema_v1",
+                "skill_id": "project_config_adapter_v1",
                 "status": "active",
                 "version": 1,
-                "dimension": "fault_mode",
-                "value": "config_schema_mismatch",
+                "skill_type": "project_skill",
+                "scope": "architecture_family",
+                "value": "configuration_adapter",
                 "retrieval_text": "configuration schema normalization default merge",
                 "skill": {
                     "title": "Config schema mismatch",
@@ -65,8 +66,8 @@ def test_embedding_retrieval_uses_cache_and_threshold(tmpdir) -> None:
 
     result = bank.search_for_explorer("demo/repo", "config option ignored by schema")
 
-    assert result["matched_skills"][0]["skill_id"] == "config_schema_v1"
-    assert result["skill_search_trace"]["retrieval_mode"] == "embedding_dimension_skill_retrieval_v1"
+    assert result["matched_skills"][0]["skill_id"] == "project_config_adapter_v1"
+    assert result["skill_search_trace"]["retrieval_mode"] == "embedding_skill_type_retrieval_v1"
     assert cache_path.exists()
     assert result["skill_search_trace"]["embedding_cache"]["generated_count"] == 1
 
@@ -96,22 +97,24 @@ def test_embedding_retrieval_can_explicitly_fallback_to_lexical_when_unconfigure
         retrieval_mode="embedding",
         embedding_client=None,
         embedding_fallback_to_lexical=True,
+        project_skill_min_score=4.0,
     )
 
     result = bank.search_for_explorer("demo/repo", "config option default merge is ignored")
 
-    assert result["matched_skills"][0]["skill_id"] == "config_schema_v1"
+    assert result["matched_skills"][0]["skill_id"] == "project_config_adapter_v1"
     assert result["skill_search_trace"]["retrieval_mode"] == "embedding_unconfigured_fallback_to_lexical_v1"
 
 
 def test_skill_embedding_text_uses_compact_retrieval_view() -> None:
     text = skill_embedding_text(
         DimensionSkill(
-            skill_id="config_schema_v1",
+            skill_id="project_config_adapter_v1",
             status="active",
             version=1,
-            dimension="fault_mode",
-            value="config_schema_mismatch",
+            skill_type="project_skill",
+            scope="architecture_family",
+            value="configuration_adapter",
             retrieval_text="configuration schema normalization default merge",
             title="Config schema mismatch",
             trigger="Use for config schema mismatch.",
@@ -140,7 +143,12 @@ def test_apply_update_warms_embedding_cache_when_client_configured(tmpdir) -> No
     result = bank.apply_update(
         {
             "operation": "add",
-            "target": {"skill_id": None, "dimension": "fault_mode", "value": "config_schema_mismatch"},
+            "target": {
+                "skill_id": None,
+                "skill_type": "project_skill",
+                "scope": "architecture_family",
+                "value": "configuration_adapter",
+            },
             "content": {
                 "title": "Config schema",
                 "trigger": "Use for config schema bugs.",
@@ -163,11 +171,12 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
     cache_path = tmp_path / "embeddings.jsonl"
     records = [
         {
-            "skill_id": "config_schema_v1",
+            "skill_id": "project_config_adapter_v1",
             "status": "active",
             "version": 1,
-            "dimension": "fault_mode",
-            "value": "config_schema_mismatch",
+            "skill_type": "project_skill",
+            "scope": "architecture_family",
+            "value": "configuration_adapter",
             "retrieval_text": "old config schema",
             "skill": {
                 "title": "Old config schema",
@@ -176,11 +185,12 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
             },
         },
         {
-            "skill_id": "config_schema_v1",
+            "skill_id": "project_config_adapter_v1",
             "status": "active",
             "version": 2,
-            "dimension": "fault_mode",
-            "value": "config_schema_mismatch",
+            "skill_type": "project_skill",
+            "scope": "architecture_family",
+            "value": "configuration_adapter",
             "retrieval_text": "new config schema",
             "skill": {
                 "title": "New config schema",
@@ -193,10 +203,11 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
     cache_path.write_text(
         json.dumps(
             {
-                "skill_id": "config_schema_v1",
+                "skill_id": "project_config_adapter_v1",
                 "version": 1,
-                "dimension": "fault_mode",
-                "value": "config_schema_mismatch",
+                "skill_type": "project_skill",
+                "scope": "architecture_family",
+                "value": "configuration_adapter",
                 "model_id": "jina-embeddings-v3",
                 "text_hash": "stale",
                 "text_preview": "old",
@@ -219,5 +230,5 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
     assert result["active_skill_count"] == 1
     assert result["embedding_cache"]["pruned_count"] == 1
     assert len(cache_records) == 1
-    assert cache_records[0]["skill_id"] == "config_schema_v1"
+    assert cache_records[0]["skill_id"] == "project_config_adapter_v1"
     assert cache_records[0]["version"] == 2

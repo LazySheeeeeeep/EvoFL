@@ -124,11 +124,9 @@ def main(argv: list[str] | None = None) -> int:
             summary["evolution"] = {
                 "eligible": evolution.get("eligible"),
                 "reason": evolution.get("reason"),
-                "failed_stage": evolution.get("failed_stage"),
-                "target_dimension": evolution.get("target_dimension"),
-                "target_value": evolution.get("target_value"),
                 "updated_skill_ids": evolution.get("updated_skill_ids", []),
-                "item_keys": evolution.get("item_keys_added_or_modified", []),
+                "updated_skill_types": evolution.get("updated_skill_types", []),
+                "skill_updates": evolution.get("skill_updates", {}),
             }
             if args.rebuild_embeddings_after_case:
                 summary["embedding_rebuild"] = rebuild_embeddings_after_case(config)

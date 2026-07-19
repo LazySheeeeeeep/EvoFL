@@ -45,21 +45,21 @@
   },
   "reflection": {
     "insight_prompt_path": "prompt_records/reflection/reflection_insight_v1.txt",
-    "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt"
+    "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt",
+    "project_type_dedup_top_k": 5,
+    "strategy_dedup_top_k": 5
   },
   "skill_bank": {
     "path": "skill_pools/skill_bank_v0/skills.jsonl",
     "retrieval_mode": "lexical",
-    "max_matched_skills": 5,
+    "max_matched_skills": 2,
     "min_score": 4.0,
-    "project_type_min_score": 6.0,
+    "project_skill_min_score": 6.0,
     "embedding_min_score": 0.48,
     "embedding_fallback_to_lexical": false,
-    "max_per_dimension": {
-      "general": 1,
-      "project_type": 1,
-      "fault_mode": 2,
-      "strategy_type": 1
+    "max_per_skill_type": {
+      "project_skill": 1,
+      "strategy_skill": 1
     }
   },
   "embedding": {
@@ -76,11 +76,9 @@
   },
   "assembler": {
     "max_knowledge_chars": 900,
-    "max_per_dimension": {
-      "general": 1,
-      "project_type": 1,
-      "fault_mode": 2,
-      "strategy_type": 1
+    "max_per_skill_type": {
+      "project_skill": 1,
+      "strategy_skill": 1
     }
   }
 }

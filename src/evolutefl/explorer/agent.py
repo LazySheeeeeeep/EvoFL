@@ -16,12 +16,6 @@ from evolutefl.tools import ToolRegistry, register_builtin_tools
 from evolutefl.tools.registry import openai_function_tool
 
 
-OUTPUT_CONTRACT = {
-    "format": {
-        "finish_tool": "Call finish_localization with ranked_functions and summary.",
-    }
-}
-
 FINISH_TOOL_NAME = "finish_localization"
 
 
@@ -48,7 +42,7 @@ class ExplorerAgent:
         self.forced_finish_max_tokens = int(config.get("explorer", {}).get("forced_finish_max_tokens", 4096))
         self.issue_abstraction_cfg = config.get("issue_abstraction", {}) or {}
         assembler_cfg = config.get("assembler", {})
-        self.max_per_dimension = assembler_cfg.get("max_per_dimension")
+        self.max_per_skill_type = assembler_cfg.get("max_per_skill_type") or assembler_cfg.get("max_per_dimension")
         self.max_knowledge_chars = int(assembler_cfg.get("max_knowledge_chars", 900))
 
     def run(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -65,7 +59,7 @@ class ExplorerAgent:
         issue_abstraction = self._build_issue_abstraction(repo, issue, run_dir)
         skill_search = self.skill_bank.search_for_explorer(repo, issue, issue_abstraction=issue_abstraction)
         matched_skills = skill_search["matched_skills"]
-        assembled_context = assemble_skill_context(matched_skills, self.max_per_dimension, self.max_knowledge_chars)
+        assembled_context = assemble_skill_context(matched_skills, self.max_per_skill_type, self.max_knowledge_chars)
         rendered_context = render_skill_context(assembled_context) if matched_skills else ""
 
         write_json(run_dir / "skill_search_trace.json", skill_search["skill_search_trace"])
@@ -79,17 +73,15 @@ class ExplorerAgent:
             "instance_id": task.get("instance_id"),
             "repo": repo,
             "base_commit": task.get("base_commit", ""),
-            "repo_path": repo_path,
             "bug_report": issue,
-            "matched_skills": matched_skills,
-            "skill_search_trace": skill_search["skill_search_trace"],
-            "assembled_context": assembled_context,
-            "rendered_localization_context": rendered_context,
-            "output_contract": OUTPUT_CONTRACT,
         }
+        if matched_skills:
+            user_payload["skill_context"] = assembled_context
         if issue_abstraction is not None:
             user_payload["issue_abstraction"] = {
                 "abstract_problem_signature": issue_abstraction.get("abstract_problem_signature", ""),
+                "project_type_key": issue_abstraction.get("project_type_key", "unknown"),
+                "project_type_description": issue_abstraction.get("project_type_description", ""),
                 "key_symptoms": issue_abstraction.get("key_symptoms", []),
             }
         write_json(run_dir / "initial_payload.json", user_payload)
@@ -165,7 +157,7 @@ class ExplorerAgent:
             response = self.llm_client.chat(
                 messages=messages,
                 tools=[_finish_tool_schema()] if finalization_mode else self._openai_tools(registry),
-                tool_choice="auto",
+                tool_choice=_finish_tool_choice() if finalization_mode else "auto",
             )
             llm_trace.append({"step": step, "response": response})
             tool_calls = response.get("tool_calls") or []
@@ -343,7 +335,7 @@ class ExplorerAgent:
         response = self.llm_client.chat(
             messages=messages,
             tools=[_finish_tool_schema()],
-            tool_choice="auto",
+            tool_choice=_finish_tool_choice(),
             max_tokens=self.forced_finish_max_tokens,
             temperature=0,
         )
@@ -607,6 +599,10 @@ def _finish_tool_schema() -> dict[str, Any]:
         },
         required=["ranked_functions", "summary"],
     )
+
+
+def _finish_tool_choice() -> dict[str, Any]:
+    return {"type": "function", "function": {"name": FINISH_TOOL_NAME}}
 
 
 def run_explorer(

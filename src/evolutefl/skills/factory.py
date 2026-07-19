@@ -16,9 +16,11 @@ def make_skill_bank(config: dict[str, Any]) -> SkillBankV0:
     return SkillBankV0(
         resolve_path(bank_cfg.get("path", "skill_pools/skill_bank_v0/skills.jsonl")),
         max_matched_skills=int(bank_cfg.get("max_matched_skills", 5)),
-        max_per_dimension=bank_cfg.get("max_per_dimension"),
+        max_per_skill_type=bank_cfg.get("max_per_skill_type") or bank_cfg.get("max_per_dimension"),
         min_score=float(bank_cfg.get("min_score", 4.0)),
-        project_type_min_score=float(bank_cfg.get("project_type_min_score", 6.0)),
+        project_skill_min_score=float(
+            bank_cfg.get("project_skill_min_score", bank_cfg.get("project_type_min_score", 6.0))
+        ),
         retrieval_mode=str(bank_cfg.get("retrieval_mode", "lexical")),
         embedding_client=make_embedding_client(config),
         embedding_cache_path=_resolve_optional_path(

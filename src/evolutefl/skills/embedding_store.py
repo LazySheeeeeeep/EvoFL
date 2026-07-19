@@ -9,8 +9,8 @@ from typing import Any
 from evolutefl.embedding import EmbeddingClient
 from evolutefl.json_utils import read_jsonl, write_jsonl
 
-from .retrieval import DEFAULT_DIMENSION_QUOTA
-from .schema import DIMENSIONS, DimensionSkill
+from .retrieval import DEFAULT_SKILL_TYPE_QUOTA
+from .schema import SKILL_TYPES, DimensionSkill
 
 
 DEFAULT_EMBEDDING_CACHE = Path("skill_pools/skill_bank_v0/embeddings/jina_v3/skill_embeddings.jsonl")
@@ -38,7 +38,8 @@ def skill_embedding_text(skill: DimensionSkill) -> str:
     """
 
     parts = [
-        f"dimension: {skill.dimension}",
+        f"skill_type: {skill.skill_type}",
+        f"scope: {skill.scope}",
         f"value: {skill.value}",
         f"title: {skill.title}",
         f"trigger: {skill.trigger}",
@@ -106,7 +107,8 @@ class SkillEmbeddingStore:
                 record = {
                     "skill_id": skill.skill_id,
                     "version": skill.version,
-                    "dimension": skill.dimension,
+                    "skill_type": skill.skill_type,
+                    "scope": skill.scope,
                     "value": skill.value,
                     "model_id": self.model_id,
                     "text_hash": text_hash,
@@ -135,7 +137,7 @@ def select_embedding_skills(
     client: EmbeddingClient,
     config: EmbeddingRetrievalConfig,
     max_matched_skills: int = 5,
-    max_per_dimension: dict[str, int] | None = None,
+    max_per_skill_type: dict[str, int] | None = None,
 ) -> tuple[list[DimensionSkill], dict[str, Any]]:
     if not skills:
         return [], _empty_trace(query_text, config, note="No active skills.")
@@ -153,35 +155,36 @@ def select_embedding_skills(
         if vector is None:
             continue
         scored.append((cosine_similarity(query_embedding, vector), skill))
-    scored.sort(key=lambda pair: (-pair[0], pair[1].dimension, pair[1].skill_id))
+    scored.sort(key=lambda pair: (-pair[0], pair[1].skill_type, pair[1].skill_id))
     top_scores = [
         {
             "skill_id": skill.skill_id,
             "score": score,
-            "dimension": skill.dimension,
+            "skill_type": skill.skill_type,
+            "scope": skill.scope,
             "value": skill.value,
         }
         for score, skill in scored[:EMBEDDING_TRACE_LIMIT]
     ]
-    quotas = {**DEFAULT_DIMENSION_QUOTA, **(max_per_dimension or {})}
+    quotas = {**DEFAULT_SKILL_TYPE_QUOTA, **(max_per_skill_type or {})}
     selected: list[DimensionSkill] = []
-    used_by_dimension = {dimension: 0 for dimension in DIMENSIONS}
+    used_by_skill_type = {skill_type: 0 for skill_type in SKILL_TYPES}
     filtered: list[dict[str, Any]] = []
     for score, skill in scored:
         if score < config.min_score:
             if score > 0:
                 filtered.append({"skill_id": skill.skill_id, "score": score, "threshold": config.min_score})
             continue
-        dimension = skill.dimension if skill.dimension in DIMENSIONS else "general"
-        if used_by_dimension[dimension] >= quotas.get(dimension, 1):
+        skill_type = skill.skill_type
+        if skill_type not in SKILL_TYPES or used_by_skill_type[skill_type] >= quotas.get(skill_type, 1):
             continue
         selected.append(skill)
-        used_by_dimension[dimension] += 1
+        used_by_skill_type[skill_type] += 1
         if len(selected) >= max_matched_skills:
             break
     trace = {
         "query": query_text,
-        "retrieval_mode": "embedding_dimension_skill_retrieval_v1",
+        "retrieval_mode": "embedding_skill_type_retrieval_v1",
         "candidate_skill_ids": [skill.skill_id for score, skill in scored if score >= config.min_score],
         "selected_skill_ids": [skill.skill_id for skill in selected],
         "top_scores": top_scores,
@@ -190,7 +193,7 @@ def select_embedding_skills(
             skill.skill_id: {
                 "embedding_score": score,
                 "threshold": config.min_score,
-                "dimension": skill.dimension,
+                "skill_type": skill.skill_type,
                 "value": skill.value,
             }
             for score, skill in scored
@@ -222,7 +225,7 @@ def _hash_text(text: str) -> str:
 def _empty_trace(query_text: str, config: EmbeddingRetrievalConfig, *, note: str) -> dict[str, Any]:
     return {
         "query": query_text,
-        "retrieval_mode": "embedding_dimension_skill_retrieval_v1",
+        "retrieval_mode": "embedding_skill_type_retrieval_v1",
         "candidate_skill_ids": [],
         "selected_skill_ids": [],
         "scores": {},

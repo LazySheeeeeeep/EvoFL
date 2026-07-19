@@ -47,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_embedding_override_args(rebuild)
     rebuild.set_defaults(func=cmd_rebuild_skill_embeddings)
 
-    assemble = sub.add_parser("assemble-skills-preview", help="Preview dimension-based context for skill ids.")
+    assemble = sub.add_parser("assemble-skills-preview", help="Preview project/strategy context for skill ids.")
     add_config_arg(assemble)
     assemble.add_argument("--skill-ids", required=True, help="Comma-separated skill ids.")
     assemble.set_defaults(func=cmd_assemble_skills_preview)
@@ -71,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve = sub.add_parser("run-case-evolution", help="Run trajectory-driven Reflector -> SkillBank update for one case.")
     add_config_arg(evolve)
     add_llm_args(evolve)
+    add_embedding_override_args(evolve)
     evolve.add_argument("--case-run-dir", required=True)
     evolve.add_argument("--repo", required=True)
     add_issue_args(evolve)
@@ -79,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--ground-truth-locations-file")
     evolve.add_argument("--force", action="store_true")
     evolve.add_argument("--legacy-insight", action="store_true", help="Use the legacy Insight -> Reflector path.")
+    evolve.add_argument(
+        "--refresh-issue-abstraction",
+        action="store_true",
+        help="Regenerate the retrieval abstraction with the current Abstractor prompt before reflection.",
+    )
     evolve.add_argument("--reflect-success", dest="reflect_success", action="store_true", default=True)
     evolve.add_argument("--no-reflect-success", dest="reflect_success", action="store_false")
     evolve.add_argument("--reflect-failure", dest="reflect_failure", action="store_true", default=True)
@@ -125,7 +131,8 @@ def cmd_search_skills_preview(args: argparse.Namespace) -> Any:
     search = bank.search_for_explorer(args.repo, issue)
     assembled = assemble_skill_context(
         search["matched_skills"],
-        config.get("assembler", {}).get("max_per_dimension"),
+        config.get("assembler", {}).get("max_per_skill_type")
+        or config.get("assembler", {}).get("max_per_dimension"),
         int(config.get("assembler", {}).get("max_knowledge_chars", 900)),
     )
     return {
@@ -149,7 +156,8 @@ def cmd_assemble_skills_preview(args: argparse.Namespace) -> Any:
     skills = [skill.compact_dict() for skill in bank.active_skills() if skill.skill_id in wanted]
     assembled = assemble_skill_context(
         skills,
-        config.get("assembler", {}).get("max_per_dimension"),
+        config.get("assembler", {}).get("max_per_skill_type")
+        or config.get("assembler", {}).get("max_per_dimension"),
         int(config.get("assembler", {}).get("max_knowledge_chars", 900)),
     )
     return {
@@ -176,6 +184,7 @@ def cmd_run_agent(args: argparse.Namespace) -> Any:
 
 def cmd_run_case_evolution(args: argparse.Namespace) -> Any:
     config = load_config(args.config)
+    apply_embedding_overrides(config, args)
     config["llm"] = llm_config(config, args.provider, args.model)
     client = OpenAICompatibleClient.from_config(config["llm"])
     return run_case_evolution(
@@ -192,6 +201,7 @@ def cmd_run_case_evolution(args: argparse.Namespace) -> Any:
         reflect_success=args.reflect_success,
         reflect_failure=args.reflect_failure,
         legacy_insight=args.legacy_insight,
+        refresh_issue_abstraction=args.refresh_issue_abstraction,
     )
 
 

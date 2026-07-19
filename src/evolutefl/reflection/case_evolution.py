@@ -6,7 +6,7 @@ from typing import Any
 
 from evolutefl.config import resolve_path
 from evolutefl.evaluation import hit_at_k
-from evolutefl.issue_abstraction import fallback_issue_abstraction
+from evolutefl.issue_abstraction import abstract_issue, fallback_issue_abstraction
 from evolutefl.json_utils import read_json, write_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.skills import make_skill_bank
@@ -31,6 +31,7 @@ def run_case_evolution(
     reflect_success: bool = True,
     reflect_failure: bool = True,
     legacy_insight: bool = False,
+    refresh_issue_abstraction: bool = False,
 ) -> dict[str, Any]:
     case_dir = Path(case_run_dir)
     out_dir = Path(output_dir) if output_dir else case_dir / "case_evolution"
@@ -69,10 +70,20 @@ def run_case_evolution(
         return summary
 
     reflection_cfg = config.get("reflection", {})
+    project_type_dedup_top_k = int(reflection_cfg.get("project_type_dedup_top_k", 5))
+    strategy_dedup_top_k = int(reflection_cfg.get("strategy_dedup_top_k", 5))
     reflector_prompt = resolve_path(reflection_cfg.get("reflector_prompt_path", "prompt_records/reflection/reflector_skill_v0.txt")).read_text(encoding="utf-8")
     client = llm_client or OpenAICompatibleClient.from_config(config.get("llm", {}))
     bank = make_skill_bank(config)
-    issue_abstraction = _load_issue_abstraction(case_dir, repo, issue, config)
+    issue_abstraction = _load_issue_abstraction(
+        case_dir,
+        repo,
+        issue,
+        config,
+        llm_client=client,
+        output_dir=out_dir,
+        refresh=refresh_issue_abstraction,
+    )
     skill_search = bank.search_for_explorer(repo, issue, issue_abstraction=issue_abstraction)
     trajectory_evidence = _build_trajectory_evidence(
         case_dir=case_dir,
@@ -113,26 +124,24 @@ def run_case_evolution(
             output_path=out_dir / "insight_debug.json",
         )
         write_json(out_dir / "insight.json", insight)
-        skill_search_context = bank.search_for_reflector(repo, issue, insight)
+        skill_search_context = bank.search_for_reflector(
+            repo,
+            issue,
+            insight,
+            issue_abstraction=issue_abstraction,
+            explorer_search=skill_search,
+            project_candidate_limit=project_type_dedup_top_k,
+            strategy_candidate_limit=strategy_dedup_top_k,
+        )
     else:
-        skill_search_context = {
-            "dimension_first_policy": (
-                "Assess general, project_type, fault_mode, and strategy_type independently. Each dimension may preserve, "
-                "no_update, update a matched/weak skill, or create a new dimension-level skill."
-            ),
-            "issue_abstraction": issue_abstraction,
-            "abstraction_used_for_retrieval": issue_abstraction is not None,
-            "dimension_queries": skill_search.get("skill_search_trace", {}).get("dimension_queries", {}),
-            "dimension_slots": skill_search.get("dimension_slots", {}),
-            "matched_case_skills": skill_search["matched_skills"],
-            "candidate_target_skills": skill_search["matched_skills"],
-            "search_trace": skill_search["skill_search_trace"],
-            "notes": [
-                "Trajectory-direct mode: Reflector may preserve, refine, correct, create, or no_update.",
-                "Choose update only for a matched skill that is genuinely the same fine-grained pattern.",
-                "Keep each dimension's reusable lesson inside that dimension's skill update.",
-            ],
-        }
+        skill_search_context = bank.search_for_reflector(
+            repo,
+            issue,
+            issue_abstraction=issue_abstraction,
+            explorer_search=skill_search,
+            project_candidate_limit=project_type_dedup_top_k,
+            strategy_candidate_limit=strategy_dedup_top_k,
+        )
     write_json(out_dir / "skill_search_context.json", skill_search_context)
 
     reflector_output = run_reflector(
@@ -171,13 +180,12 @@ def run_case_evolution(
             "issue_abstraction": issue_abstraction,
             "trajectory_evidence": trajectory_evidence,
             "reflector_output": reflector_output,
-            "dimension_assessment": reflector_output.get("dimension_assessment"),
-            "dimension_updates": reflector_output.get("dimension_updates"),
+            "skill_updates": reflector_output.get("skill_updates"),
             "applied_edits": applied_edits,
             "failed_edits": failed_edits,
             "outcome_type": outcome.get("label"),
             "updated_skill_ids": [item.get("updated_skill_id") for item in applied_edits if item.get("updated_skill_id")],
-            "updated_dimensions": _updated_dimensions_from_edits(reflector_output.get("materialized_edits", [])),
+            "updated_skill_types": _updated_skill_types_from_edits(reflector_output.get("materialized_edits", [])),
             "edited_fields": [item.get("field") for item in applied_edits if item.get("field")],
             "no_update_reason": reflector_output.get("no_update_reason"),
         }
@@ -202,10 +210,30 @@ def _load_issue_abstraction(
     repo: str,
     issue: str,
     config: dict[str, Any],
+    *,
+    llm_client: Any | None = None,
+    output_dir: Path | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any] | None:
     abstraction_cfg = config.get("issue_abstraction", {}) or {}
     if abstraction_cfg.get("enabled", True) is False:
         return None
+    if refresh:
+        if llm_client is None:
+            raise ValueError("Refreshing issue abstraction requires an LLM client.")
+        prompt_path = resolve_path(
+            abstraction_cfg.get("prompt_path", "prompt_records/explorer/issue_abstraction_v0.txt")
+        )
+        abstraction = abstract_issue(
+            repo=repo,
+            issue=issue,
+            llm_client=llm_client,
+            prompt=prompt_path.read_text(encoding="utf-8"),
+            output_path=(output_dir / "issue_abstraction_debug.json") if output_dir else None,
+        )
+        if output_dir:
+            write_json(output_dir / "issue_abstraction.json", abstraction)
+        return abstraction
     abstraction_path = case_dir / "issue_abstraction.json"
     if abstraction_path.exists():
         try:
@@ -298,7 +326,7 @@ def _build_trajectory_evidence(
         },
         "retrieved_skill_context": {
             "matched_skills": skill_search.get("matched_skills", []),
-            "dimension_slots": skill_search.get("dimension_slots", {}),
+            "skill_type_slots": skill_search.get("skill_type_slots", {}),
             "skill_search_trace": skill_search.get("skill_search_trace", {}),
         },
         "evolution_policy_hint": _policy_hint(outcome, bool(skill_search.get("matched_skills"))),
@@ -317,11 +345,11 @@ def _policy_hint(outcome: dict[str, Any], has_relevant_skill: bool) -> str:
     return "Failure without relevant retrieved skill: create only if the lesson is transferable; otherwise no_update."
 
 
-def _updated_dimensions_from_edits(edits: list[dict[str, Any]]) -> list[str]:
-    dimensions: list[str] = []
+def _updated_skill_types_from_edits(edits: list[dict[str, Any]]) -> list[str]:
+    skill_types: list[str] = []
     for edit in edits:
         target = edit.get("target") if isinstance(edit, dict) else {}
-        dimension = target.get("dimension") if isinstance(target, dict) else None
-        if dimension and dimension not in dimensions:
-            dimensions.append(str(dimension))
-    return dimensions
+        skill_type = target.get("skill_type") if isinstance(target, dict) else None
+        if skill_type and skill_type not in skill_types:
+            skill_types.append(str(skill_type))
+    return skill_types

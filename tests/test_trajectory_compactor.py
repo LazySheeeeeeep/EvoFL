@@ -30,6 +30,25 @@ def test_compactor_preserves_head_and_tail_with_middle_marker() -> None:
     assert compacted["trajectory_summary"][0]["event"] == "skill_context"
     assert any(event["event"] == "middle_truncated" for event in compacted["trajectory_summary"])
     assert compacted["trajectory_summary"][-1]["event"] == "finish"
+    assert "raw_trajectory" not in compacted
+
+
+def test_compactor_excludes_embedding_trace_from_skill_context() -> None:
+    trajectory = [
+        {
+            "event": "skill_context",
+            "issue_abstraction": {"abstract_problem_signature": "Configured value is ignored."},
+            "skill_search_trace": {"embedding": [0.1] * 10000},
+            "matched_skill_ids": ["project_config_v1"],
+            "assembled_context": {"sections": {"project_skill": []}},
+        }
+    ]
+
+    compacted = build_compacted_trajectory(trajectory)
+    details = compacted["trajectory_summary"][0]["details"]
+
+    assert details["matched_skill_ids"] == ["project_config_v1"]
+    assert "skill_search_trace" not in details
 
 
 def test_compactor_clips_tool_observation_with_head_and_tail() -> None:

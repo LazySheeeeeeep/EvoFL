@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,9 +10,10 @@ from evolutefl.json_utils import extract_json_object, write_json
 
 ABSTRACTION_FIELDS = (
     "abstract_problem_signature",
-    "project_type_query",
-    "fault_mode_query",
-    "strategy_type_query",
+    "project_type_key",
+    "project_type_description",
+    "project_skill_query",
+    "strategy_skill_query",
     "key_symptoms",
 )
 
@@ -25,7 +27,7 @@ def abstract_issue(
     attempts: int = 2,
     output_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Return a compact issue abstraction for dimension-specific skill retrieval."""
+    """Return a compact issue abstraction for project/strategy skill retrieval."""
 
     payload = {"repo": repo, "issue": issue}
     messages = [
@@ -71,9 +73,18 @@ def normalize_issue_abstraction(payload: dict[str, Any], *, repo: str, issue: st
         raise ValueError("Issue abstraction must be a JSON object.")
     normalized = {
         "abstract_problem_signature": _clean_string(payload.get("abstract_problem_signature")),
-        "project_type_query": _clean_string(payload.get("project_type_query")),
-        "fault_mode_query": _clean_string(payload.get("fault_mode_query")),
-        "strategy_type_query": _clean_string(payload.get("strategy_type_query")),
+        "project_type_key": _normalize_project_type_key(
+            payload.get("project_type_key") or payload.get("system_type_key")
+        ),
+        "project_type_description": _clean_string(
+            payload.get("project_type_description") or payload.get("system_type_description")
+        ),
+        "project_skill_query": _clean_string(
+            payload.get("project_skill_query") or payload.get("project_type_query")
+        ),
+        "strategy_skill_query": _clean_string(
+            payload.get("strategy_skill_query") or payload.get("strategy_type_query")
+        ),
         "key_symptoms": _clean_list(payload.get("key_symptoms")),
     }
     if not any(normalized[field] for field in ABSTRACTION_FIELDS if field != "key_symptoms"):
@@ -91,9 +102,10 @@ def fallback_issue_abstraction(repo: str, issue: str, *, error: Exception | None
     signature = _first_non_empty_line(issue) or f"Issue in {repo}"
     fallback = {
         "abstract_problem_signature": signature[:800],
-        "project_type_query": repo,
-        "fault_mode_query": issue[:1200],
-        "strategy_type_query": issue[:1200],
+        "project_type_key": "unknown",
+        "project_type_description": "Software system whose reusable architectural type is not established from the issue alone.",
+        "project_skill_query": f"Repository or architecture context: {repo}",
+        "strategy_skill_query": issue[:1200],
         "key_symptoms": [],
     }
     if error is not None:
@@ -113,6 +125,12 @@ def _clean_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _normalize_project_type_key(value: Any) -> str:
+    text = _clean_string(value).lower()
+    normalized = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return normalized[:80] or "unknown"
 
 
 def _first_non_empty_line(text: str) -> str:

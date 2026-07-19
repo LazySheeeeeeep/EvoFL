@@ -45,7 +45,7 @@ DEFAULT_OUTPUT_DIR = "runs/swe_explore_verified_10_compare_gpt5mini_jina_2026070
 DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
 SWE_EXPLORE_DATASET = "SWE-Explore-Bench/SWE-Explore-Bench"
 SWE_VERIFIED_DATASET = "princeton-nlp/SWE-bench_Verified"
-DIMENSIONS = ("project_type", "fault_mode", "strategy_type", "general")
+SKILL_TYPES = ("project_skill", "strategy_skill")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -697,19 +697,17 @@ def build_retrieval_rows(arm_dir: Path, metric_rows: list[dict[str, Any]]) -> li
     for case_dir in sorted((arm_dir / "cases").iterdir()):
         matched_path = case_dir / "matched_skills.json"
         matched = json.loads(matched_path.read_text(encoding="utf-8")) if matched_path.exists() else []
-        counts = Counter(skill.get("dimension", "unknown") for skill in matched)
+        counts = Counter(skill.get("skill_type", "unknown") for skill in matched)
         metric = metric_by_case.get(case_dir.name, {})
         rows.append(
             {
                 "case": case_dir.name,
                 "matched_skill_count": len(matched),
-                "matched_dimensions": sorted(counts),
-                "matched_dimension_counts": dict(counts),
+                "matched_skill_types": sorted(counts),
+                "matched_skill_type_counts": dict(counts),
                 "has_any_skill": bool(matched),
-                "has_project_type": "project_type" in counts,
-                "has_fault_mode": "fault_mode" in counts,
-                "has_strategy_type": "strategy_type" in counts,
-                "has_general": "general" in counts,
+                "has_project_skill": "project_skill" in counts,
+                "has_strategy_skill": "strategy_skill" in counts,
                 "top1": bool(metric.get("top1_file")),
                 "top3": bool(metric.get("top3_file")),
                 "top5": bool(metric.get("top5_file")),

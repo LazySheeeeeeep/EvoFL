@@ -14,8 +14,14 @@ from .embedding_store import (
     query_embedding_text,
     select_embedding_skills,
 )
-from .retrieval import DEFAULT_DIMENSION_QUOTA, select_skills
-from .schema import DIMENSIONS, DimensionSkill, build_retrieval_text, slugify
+from .retrieval import DEFAULT_SKILL_TYPE_QUOTA, select_skills
+from .schema import (
+    SKILL_TYPES,
+    DimensionSkill,
+    UnsupportedLegacySkillError,
+    build_retrieval_text,
+    slugify,
+)
 
 
 class SkillBankV0:
@@ -24,9 +30,9 @@ class SkillBankV0:
         path: str | Path,
         *,
         max_matched_skills: int = 5,
-        max_per_dimension: dict[str, int] | None = None,
+        max_per_skill_type: dict[str, int] | None = None,
         min_score: float = 4.0,
-        project_type_min_score: float = 6.0,
+        project_skill_min_score: float = 6.0,
         retrieval_mode: str = "lexical",
         embedding_client: EmbeddingClient | None = None,
         embedding_cache_path: str | Path | None = None,
@@ -39,9 +45,9 @@ class SkillBankV0:
     ) -> None:
         self.path = Path(path)
         self.max_matched_skills = max_matched_skills
-        self.max_per_dimension = {**DEFAULT_DIMENSION_QUOTA, **(max_per_dimension or {})}
+        self.max_per_skill_type = {**DEFAULT_SKILL_TYPE_QUOTA, **(max_per_skill_type or {})}
         self.min_score = min_score
-        self.project_type_min_score = project_type_min_score
+        self.project_skill_min_score = project_skill_min_score
         self.retrieval_mode = _valid_retrieval_mode(retrieval_mode)
         self.embedding_client = embedding_client
         default_cache = self.path.parent / "embeddings" / "jina_v3" / "skill_embeddings.jsonl"
@@ -60,7 +66,10 @@ class SkillBankV0:
         latest_by_id: dict[str, DimensionSkill] = {}
         ordered_ids: list[str] = []
         for record in records:
-            skill = DimensionSkill.from_dict(record)
+            try:
+                skill = DimensionSkill.from_dict(record)
+            except UnsupportedLegacySkillError:
+                continue
             if skill.skill_id not in latest_by_id:
                 ordered_ids.append(skill.skill_id)
             current = latest_by_id.get(skill.skill_id)
@@ -86,7 +95,7 @@ class SkillBankV0:
             query,
             active,
             max_matched_skills=self.max_matched_skills,
-            max_per_dimension=self.max_per_dimension,
+            max_per_skill_type=self.max_per_skill_type,
         )
         scores = trace.get("scores", {})
         reasons = trace.get("match_reasons", {})
@@ -94,13 +103,13 @@ class SkillBankV0:
             skill.compact_dict(score=scores.get(skill.skill_id), match_reasons=reasons.get(skill.skill_id, {}))
             for skill in selected
         ]
-        dimension_slots = _build_dimension_slots(active, matched_skills, trace)
-        trace["dimension_slot_summary"] = {
-            dimension: slot["status"] for dimension, slot in dimension_slots.items()
+        skill_type_slots = _build_skill_type_slots(active, matched_skills, trace)
+        trace["skill_type_slot_summary"] = {
+            skill_type: slot["status"] for skill_type, slot in skill_type_slots.items()
         }
         return {
             "matched_skills": matched_skills,
-            "dimension_slots": dimension_slots,
+            "skill_type_slots": skill_type_slots,
             "skill_search_trace": trace,
         }
 
@@ -111,23 +120,23 @@ class SkillBankV0:
         issue_abstraction: dict[str, Any],
     ) -> dict[str, Any]:
         active = self.active_skills()
-        queries = _dimension_queries_from_abstraction(repo, issue, issue_abstraction)
+        queries = _skill_type_queries_from_abstraction(repo, issue, issue_abstraction)
         selected_by_id: dict[str, DimensionSkill] = {}
         scores_by_id: dict[str, float] = {}
         reasons_by_id: dict[str, dict[str, Any]] = {}
-        dimension_traces: dict[str, dict[str, Any]] = {}
+        skill_type_traces: dict[str, dict[str, Any]] = {}
 
-        for dimension in DIMENSIONS:
-            query = queries.get(dimension) or query_embedding_text(repo, issue)
-            dimension_active = [skill for skill in active if skill.dimension == dimension]
-            quota = self.max_per_dimension.get(dimension, 1)
+        for skill_type in SKILL_TYPES:
+            query = queries.get(skill_type) or query_embedding_text(repo, issue)
+            type_active = [skill for skill in active if skill.skill_type == skill_type]
+            quota = self.max_per_skill_type.get(skill_type, 1)
             selected, trace = self._select_for_query(
                 query,
-                dimension_active,
+                type_active,
                 max_matched_skills=quota,
-                max_per_dimension={dimension: quota},
+                max_per_skill_type={skill_type: quota},
             )
-            dimension_traces[dimension] = trace
+            skill_type_traces[skill_type] = trace
             trace_scores = trace.get("scores", {}) or {}
             trace_reasons = trace.get("match_reasons", {}) or {}
             for skill in selected:
@@ -140,58 +149,284 @@ class SkillBankV0:
         selected_skills = _merge_selected_by_quota(
             list(selected_by_id.values()),
             max_matched_skills=self.max_matched_skills,
-            max_per_dimension=self.max_per_dimension,
+            max_per_skill_type=self.max_per_skill_type,
         )
         matched_skills = [
             skill.compact_dict(score=scores_by_id.get(skill.skill_id), match_reasons=reasons_by_id.get(skill.skill_id, {}))
             for skill in selected_skills
         ]
-        dimension_slots = _build_dimension_slots(active, matched_skills, _merge_dimension_traces(queries, dimension_traces, selected_skills))
-        trace = _merge_dimension_traces(queries, dimension_traces, selected_skills)
-        trace["dimension_slot_summary"] = {
-            dimension: slot["status"] for dimension, slot in dimension_slots.items()
+        skill_type_slots = _build_skill_type_slots(
+            active,
+            matched_skills,
+            _merge_skill_type_traces(queries, skill_type_traces, selected_skills),
+        )
+        trace = _merge_skill_type_traces(queries, skill_type_traces, selected_skills)
+        trace["skill_type_slot_summary"] = {
+            skill_type: slot["status"] for skill_type, slot in skill_type_slots.items()
         }
         return {
             "matched_skills": matched_skills,
-            "dimension_slots": dimension_slots,
+            "skill_type_slots": skill_type_slots,
             "skill_search_trace": trace,
         }
 
-    def search_for_reflector(self, repo: str, issue: str, insight: dict[str, Any]) -> dict[str, Any]:
+    def search_for_reflector(
+        self,
+        repo: str,
+        issue: str,
+        insight: dict[str, Any] | None = None,
+        *,
+        issue_abstraction: dict[str, Any] | None = None,
+        explorer_search: dict[str, Any] | None = None,
+        project_candidate_limit: int = 5,
+        strategy_candidate_limit: int = 5,
+    ) -> dict[str, Any]:
+        if explorer_search is None and issue_abstraction:
+            explorer_search = self.search_for_explorer(
+                repo,
+                issue,
+                issue_abstraction=issue_abstraction,
+            )
+        if explorer_search is not None:
+            return self._reflector_context_from_explorer_search(
+                explorer_search,
+                insight=insight,
+                issue_abstraction=issue_abstraction,
+                project_candidate_limit=project_candidate_limit,
+                strategy_candidate_limit=strategy_candidate_limit,
+            )
+
+        insight = insight or {}
         analysis = insight.get("analysis", {}) if isinstance(insight, dict) else {}
-        dimension = analysis.get("missing_or_reinforced_dimension") or analysis.get("missing_dimension") or "general"
+        target_skill_type = analysis.get("missing_or_reinforced_skill_type")
         value = analysis.get("target_value_hint", "unknown")
         query = f"{repo}\n{issue}\n{analysis.get('transferable_lesson', '')}\n{value}"
         active = self.active_skills()
         selected, trace = self._select_for_query(
             query,
             active,
-            max_matched_skills=8,
-            max_per_dimension={"general": 2, "project_type": 2, "fault_mode": 3, "strategy_type": 2},
+            max_matched_skills=4,
+            max_per_skill_type={"project_skill": 2, "strategy_skill": 2},
         )
         scores = trace.get("scores", {})
         reasons = trace.get("match_reasons", {})
-        same_dimension = [skill for skill in selected if skill.dimension == dimension]
+        same_type = [skill for skill in selected if skill.skill_type == target_skill_type]
         compact = [
             skill.compact_dict(score=scores.get(skill.skill_id), match_reasons=reasons.get(skill.skill_id, {}))
             for skill in selected
         ]
-        dimension_slots = _build_dimension_slots(active, compact, trace)
-        trace["dimension_slot_summary"] = {
-            slot_dimension: slot["status"] for slot_dimension, slot in dimension_slots.items()
+        skill_type_slots = _build_skill_type_slots(active, compact, trace)
+        trace["skill_type_slot_summary"] = {
+            skill_type: slot["status"] for skill_type, slot in skill_type_slots.items()
         }
-        return {
-            "dimension_query": {
-                "target_dimension": dimension,
+        explorer_like_search = {
+            "matched_skills": compact,
+            "skill_type_slots": skill_type_slots,
+            "skill_search_trace": trace,
+        }
+        context = self._reflector_context_from_explorer_search(
+            explorer_like_search,
+            insight=insight,
+            issue_abstraction=issue_abstraction,
+            project_candidate_limit=project_candidate_limit,
+            strategy_candidate_limit=strategy_candidate_limit,
+        )
+        context.update({
+            "skill_type_query": {
+                "target_skill_type": target_skill_type,
                 "target_value": value,
             },
-            "dimension_slots": dimension_slots,
-            "same_dimension_skills": [
+            "same_type_skills": [
                 skill.compact_dict(score=scores.get(skill.skill_id), match_reasons=reasons.get(skill.skill_id, {}))
-                for skill in same_dimension
+                for skill in same_type
             ],
-            "candidate_target_skills": compact,
+        })
+        return context
+
+    def _reflector_context_from_explorer_search(
+        self,
+        explorer_search: dict[str, Any],
+        *,
+        insight: dict[str, Any] | None,
+        issue_abstraction: dict[str, Any] | None,
+        project_candidate_limit: int,
+        strategy_candidate_limit: int,
+    ) -> dict[str, Any]:
+        active_by_id = {skill.skill_id: skill for skill in self.active_skills()}
+        matched = [
+            skill for skill in explorer_search.get("matched_skills", []) or [] if isinstance(skill, dict)
+        ]
+        slots = explorer_search.get("skill_type_slots", {}) or {}
+        trace = explorer_search.get("skill_search_trace", {}) or {}
+        trace_scores = trace.get("scores", {}) or {}
+        candidates_by_id: dict[str, dict[str, Any]] = {}
+
+        def add_candidate(candidate: dict[str, Any], role: str, score: Any = None) -> dict[str, Any]:
+            skill_id = str(candidate.get("skill_id") or "")
+            existing = candidates_by_id.get(skill_id)
+            if existing is not None:
+                roles = existing.setdefault("candidate_roles", [existing.get("candidate_role")])
+                if role not in roles:
+                    roles.append(role)
+                if score is not None:
+                    try:
+                        existing["retrieval_score"] = float(score)
+                    except (TypeError, ValueError):
+                        pass
+                return existing
+            item = dict(candidate)
+            item["candidate_role"] = role
+            item["candidate_roles"] = [role]
+            if score is not None:
+                try:
+                    item["retrieval_score"] = float(score)
+                except (TypeError, ValueError):
+                    pass
+            if skill_id:
+                candidates_by_id[skill_id] = item
+            return item
+
+        for candidate in matched:
+            add_candidate(
+                candidate,
+                "explorer_matched",
+                trace_scores.get(str(candidate.get("skill_id") or "")),
+            )
+        for skill_type, slot in slots.items():
+            if not isinstance(slot, dict):
+                continue
+            for candidate in slot.get("weak_candidates", []) or []:
+                if isinstance(candidate, dict):
+                    add_candidate(
+                        candidate,
+                        f"{skill_type}_weak_candidate",
+                        candidate.get("retrieval_score") or candidate.get("score"),
+                    )
+
+        project_type_key = str((issue_abstraction or {}).get("project_type_key") or "unknown").strip()
+        project_type_description = str(
+            (issue_abstraction or {}).get("project_type_description") or ""
+        ).strip()
+        project_identity_trace: dict[str, Any] = {}
+        if project_type_description and project_candidate_limit > 0:
+            project_skills = [
+                skill for skill in active_by_id.values() if skill.skill_type == "project_skill"
+            ]
+            _, project_identity_trace = self._select_for_query(
+                project_type_description,
+                project_skills,
+                max_matched_skills=project_candidate_limit,
+                max_per_skill_type={"project_skill": project_candidate_limit},
+            )
+
+        project_trace = (trace.get("skill_type_traces", {}) or {}).get("project_skill", {}) or {}
+        project_top_scores = project_identity_trace.get("top_scores", []) or []
+        if not project_top_scores:
+            project_top_scores = project_trace.get("top_scores", []) or []
+        if not project_top_scores:
+            project_top_scores = [
+                item
+                for item in trace.get("top_scores", []) or []
+                if isinstance(item, dict)
+                and (item.get("query_skill_type") == "project_skill" or item.get("skill_type") == "project_skill")
+            ]
+        project_scores_by_id = {
+            str(item.get("skill_id") or ""): item.get("score")
+            for item in project_top_scores
+            if isinstance(item, dict) and item.get("skill_id")
+        }
+        project_type_candidates: list[dict[str, Any]] = []
+
+        def add_project_type_candidate(skill: DimensionSkill, role: str, score: Any = None) -> None:
+            if len(project_type_candidates) >= max(0, project_candidate_limit):
+                return
+            candidate = add_candidate(skill.compact_dict(), role, score)
+            if candidate not in project_type_candidates:
+                project_type_candidates.append(candidate)
+
+        if project_type_key and project_type_key != "unknown":
+            normalized_key = slugify(project_type_key)
+            for skill in active_by_id.values():
+                if skill.skill_type == "project_skill" and slugify(skill.value) == normalized_key:
+                    add_project_type_candidate(
+                        skill,
+                        "project_type_exact_candidate",
+                        project_scores_by_id.get(skill.skill_id),
+                    )
+        for score_item in project_top_scores:
+            if len(project_type_candidates) >= max(0, project_candidate_limit):
+                break
+            if not isinstance(score_item, dict):
+                continue
+            skill = active_by_id.get(str(score_item.get("skill_id") or ""))
+            if skill is None or skill.skill_type != "project_skill":
+                continue
+            add_project_type_candidate(
+                skill,
+                "project_type_semantic_dedup_candidate",
+                score_item.get("score"),
+            )
+
+        strategy_trace = (trace.get("skill_type_traces", {}) or {}).get("strategy_skill", {}) or {}
+        strategy_top_scores = strategy_trace.get("top_scores", []) or []
+        if not strategy_top_scores:
+            strategy_top_scores = [
+                item
+                for item in trace.get("top_scores", []) or []
+                if isinstance(item, dict)
+                and (item.get("query_skill_type") == "strategy_skill" or item.get("skill_type") == "strategy_skill")
+            ]
+        strategy_dedup_candidates: list[dict[str, Any]] = []
+        for score_item in strategy_top_scores:
+            if len(strategy_dedup_candidates) >= max(0, strategy_candidate_limit):
+                break
+            if not isinstance(score_item, dict):
+                continue
+            skill_id = str(score_item.get("skill_id") or "")
+            skill = active_by_id.get(skill_id)
+            if skill is None or skill.skill_type != "strategy_skill":
+                continue
+            candidate = add_candidate(
+                skill.compact_dict(),
+                "strategy_semantic_dedup_candidate",
+                score_item.get("score"),
+            )
+            if candidate not in strategy_dedup_candidates:
+                strategy_dedup_candidates.append(candidate)
+
+        analysis = (insight or {}).get("analysis", {}) if isinstance(insight, dict) else {}
+        target_skill_type = analysis.get("missing_or_reinforced_skill_type")
+        same_type = [
+            candidate
+            for candidate in candidates_by_id.values()
+            if candidate.get("skill_type") == target_skill_type
+        ]
+        return {
+            "skill_type_policy": (
+                "Explorer-matched skills passed the execution threshold. Strategy dedup candidates are lower-threshold "
+                "neighbors supplied only to decide whether the same reusable strategy already exists."
+            ),
+            "issue_abstraction": issue_abstraction,
+            "abstraction_used_for_retrieval": issue_abstraction is not None,
+            "skill_type_queries": trace.get("skill_type_queries", {}),
+            "skill_type_slots": slots,
+            "matched_case_skills": matched,
+            "project_type": {
+                "key": project_type_key,
+                "description": project_type_description,
+                "identity_query": project_type_description,
+            },
+            "project_type_candidates": project_type_candidates,
+            "project_identity_trace": project_identity_trace,
+            "strategy_dedup_candidates": strategy_dedup_candidates,
+            "candidate_target_skills": list(candidates_by_id.values()),
+            "same_type_skills": same_type,
             "search_trace": trace,
+            "notes": [
+                "A strategy dedup candidate is not automatically applicable to Explorer.",
+                "A project type candidate represents an existing system-type container and may be updated even when it did not pass Explorer's execution threshold.",
+                "Use it as an update or preserve target only when the evidence condition, diagnostic action, and ranking consequence have the same semantic identity.",
+            ],
         }
 
     def rebuild_embeddings(self) -> dict[str, Any]:
@@ -218,34 +453,39 @@ class SkillBankV0:
         active: list[DimensionSkill],
         *,
         max_matched_skills: int,
-        max_per_dimension: dict[str, int],
+        max_per_skill_type: dict[str, int],
     ) -> tuple[list[DimensionSkill], dict[str, Any]]:
         if self.retrieval_mode == "lexical":
-            return self._select_lexical(query, active, max_matched_skills=max_matched_skills, max_per_dimension=max_per_dimension)
+            return self._select_lexical(
+                query,
+                active,
+                max_matched_skills=max_matched_skills,
+                max_per_skill_type=max_per_skill_type,
+            )
         if self.retrieval_mode == "embedding":
             return self._select_embedding_or_fallback(
                 query,
                 active,
                 max_matched_skills=max_matched_skills,
-                max_per_dimension=max_per_dimension,
+                max_per_skill_type=max_per_skill_type,
             )
         embedding_selected, embedding_trace = self._select_embedding_or_fallback(
             query,
             active,
             max_matched_skills=max_matched_skills,
-            max_per_dimension=max_per_dimension,
+            max_per_skill_type=max_per_skill_type,
             fallback_to_lexical=False,
         )
         lexical_selected, lexical_trace = self._select_lexical(
             query,
             active,
             max_matched_skills=max_matched_skills,
-            max_per_dimension=max_per_dimension,
+            max_per_skill_type=max_per_skill_type,
         )
         selected = _merge_selected_by_quota(
             [*embedding_selected, *lexical_selected],
             max_matched_skills=max_matched_skills,
-            max_per_dimension=max_per_dimension,
+            max_per_skill_type=max_per_skill_type,
         )
         trace = _merge_hybrid_trace(query, selected, embedding_trace, lexical_trace)
         return selected, trace
@@ -256,15 +496,15 @@ class SkillBankV0:
         active: list[DimensionSkill],
         *,
         max_matched_skills: int,
-        max_per_dimension: dict[str, int],
+        max_per_skill_type: dict[str, int],
     ) -> tuple[list[DimensionSkill], dict[str, Any]]:
         return select_skills(
             query,
             active,
             max_matched_skills=max_matched_skills,
-            max_per_dimension=max_per_dimension,
+            max_per_skill_type=max_per_skill_type,
             min_score=self.min_score,
-            project_type_min_score=self.project_type_min_score,
+            project_skill_min_score=self.project_skill_min_score,
         )
 
     def _select_embedding_or_fallback(
@@ -273,7 +513,7 @@ class SkillBankV0:
         active: list[DimensionSkill],
         *,
         max_matched_skills: int,
-        max_per_dimension: dict[str, int],
+        max_per_skill_type: dict[str, int],
         fallback_to_lexical: bool | None = None,
     ) -> tuple[list[DimensionSkill], dict[str, Any]]:
         should_fallback = self.embedding_config.fallback_to_lexical if fallback_to_lexical is None else fallback_to_lexical
@@ -283,7 +523,7 @@ class SkillBankV0:
                     query,
                     active,
                     max_matched_skills=max_matched_skills,
-                    max_per_dimension=max_per_dimension,
+                    max_per_skill_type=max_per_skill_type,
                 )
                 trace["retrieval_mode"] = "embedding_unconfigured_fallback_to_lexical_v1"
                 trace.setdefault("notes", []).append("Embedding client is not configured.")
@@ -305,7 +545,7 @@ class SkillBankV0:
                 client=self.embedding_client,
                 config=self.embedding_config,
                 max_matched_skills=max_matched_skills,
-                max_per_dimension=max_per_dimension,
+                max_per_skill_type=max_per_skill_type,
             )
         except Exception as exc:  # noqa: BLE001 - retrieval should degrade, not break Explorer.
             if not should_fallback:
@@ -323,7 +563,7 @@ class SkillBankV0:
                 query,
                 active,
                 max_matched_skills=max_matched_skills,
-                max_per_dimension=max_per_dimension,
+                max_per_skill_type=max_per_skill_type,
             )
             trace["retrieval_mode"] = "embedding_failed_fallback_to_lexical_v1"
             trace.setdefault("notes", []).append(f"Embedding retrieval failed: {exc}")
@@ -341,7 +581,8 @@ class SkillBankV0:
 
     def _apply_create_new(self, edit: dict[str, Any]) -> dict[str, Any]:
         target = edit.get("target") or {}
-        dimension = _valid_dimension(target.get("dimension"))
+        skill_type = _valid_skill_type(target.get("skill_type"))
+        scope = _valid_scope(skill_type, target.get("scope"))
         value = str(target.get("value") or "unknown")
         content = edit.get("content") or {}
         text = str(content.get("text") or content.get("new_text") or "").strip()
@@ -349,14 +590,18 @@ class SkillBankV0:
             raise ValueError("add edit requires content.text for new skill.")
         title = str(content.get("title") or _title_from_value(value))
         trigger = str(content.get("trigger") or f"Use when the issue matches {value.replace('_', ' ')} localization patterns.")
-        retrieval_text = str(content.get("retrieval_text") or build_retrieval_text(title, trigger, dimension, value))
+        retrieval_text = str(
+            content.get("retrieval_text")
+            or build_retrieval_text(title, trigger, skill_type, value, scope)
+        )
         existing = self.load()
-        skill_id = _unique_skill_id(existing, f"{dimension}_{value}_v1")
+        skill_id = _unique_skill_id(existing, f"{skill_type}_{value}_v1")
         skill = DimensionSkill(
             skill_id=skill_id,
             status="active",
             version=1,
-            dimension=dimension,
+            skill_type=skill_type,
+            scope=scope,
             value=value,
             retrieval_text=retrieval_text,
             title=title,
@@ -388,7 +633,13 @@ class SkillBankV0:
         operation = str(edit.get("operation"))
         _apply_text_edit(new_skill, field, operation, edit.get("content") or {})
         if not new_skill.retrieval_text:
-            new_skill.retrieval_text = build_retrieval_text(new_skill.title, new_skill.trigger, new_skill.dimension, new_skill.value)
+            new_skill.retrieval_text = build_retrieval_text(
+                new_skill.title,
+                new_skill.trigger,
+                new_skill.skill_type,
+                new_skill.value,
+                new_skill.scope,
+            )
 
         superseded = deepcopy(old)
         superseded.status = "superseded"
@@ -436,11 +687,23 @@ class SkillBankV0:
             return {"enabled": True, "error": str(exc)}
 
 
-def _valid_dimension(value: Any) -> str:
-    dimension = str(value or "general")
-    if dimension not in DIMENSIONS:
-        raise ValueError(f"Invalid target dimension: {dimension!r}")
-    return dimension
+def _valid_skill_type(value: Any) -> str:
+    skill_type = str(value or "")
+    if skill_type not in SKILL_TYPES:
+        raise ValueError(f"Invalid target skill_type: {skill_type!r}")
+    return skill_type
+
+
+def _valid_scope(skill_type: str, value: Any) -> str:
+    defaults = {"project_skill": "architecture_family", "strategy_skill": "contextual"}
+    allowed = {
+        "project_skill": {"repository", "architecture_family"},
+        "strategy_skill": {"global", "contextual"},
+    }
+    scope = str(value or defaults[skill_type])
+    if scope not in allowed[skill_type]:
+        raise ValueError(f"Invalid scope {scope!r} for {skill_type}.")
+    return scope
 
 
 def _valid_retrieval_mode(value: Any) -> str:
@@ -458,20 +721,20 @@ def _merge_selected_by_quota(
     candidates: list[DimensionSkill],
     *,
     max_matched_skills: int,
-    max_per_dimension: dict[str, int],
+    max_per_skill_type: dict[str, int],
 ) -> list[DimensionSkill]:
     selected: list[DimensionSkill] = []
     seen: set[str] = set()
-    used_by_dimension = {dimension: 0 for dimension in DIMENSIONS}
+    used_by_skill_type = {skill_type: 0 for skill_type in SKILL_TYPES}
     for skill in candidates:
         if skill.skill_id in seen:
             continue
-        dimension = skill.dimension if skill.dimension in DIMENSIONS else "general"
-        if used_by_dimension[dimension] >= max_per_dimension.get(dimension, 1):
+        skill_type = skill.skill_type
+        if used_by_skill_type[skill_type] >= max_per_skill_type.get(skill_type, 1):
             continue
         selected.append(skill)
         seen.add(skill.skill_id)
-        used_by_dimension[dimension] += 1
+        used_by_skill_type[skill_type] += 1
         if len(selected) >= max_matched_skills:
             break
     return selected
@@ -501,7 +764,7 @@ def _merge_hybrid_trace(
     notes.extend(lexical_trace.get("notes") or [])
     return {
         "query": query,
-        "retrieval_mode": "hybrid_dimension_skill_retrieval_v1",
+        "retrieval_mode": "hybrid_skill_type_retrieval_v1",
         "candidate_skill_ids": list(
             dict.fromkeys(
                 [
@@ -520,23 +783,25 @@ def _merge_hybrid_trace(
     }
 
 
-def _dimension_queries_from_abstraction(
+def _skill_type_queries_from_abstraction(
     repo: str,
     issue: str,
     issue_abstraction: dict[str, Any],
 ) -> dict[str, str]:
     signature = str(issue_abstraction.get("abstract_problem_signature") or "").strip()
+    project_query = str(issue_abstraction.get("project_skill_query") or signature or repo).strip()
+    project_type_description = str(issue_abstraction.get("project_type_description") or "").strip()
     return {
-        "general": signature or query_embedding_text(repo, issue),
-        "project_type": str(issue_abstraction.get("project_type_query") or signature or repo).strip(),
-        "fault_mode": str(issue_abstraction.get("fault_mode_query") or signature or issue).strip(),
-        "strategy_type": str(issue_abstraction.get("strategy_type_query") or signature or issue).strip(),
+        "project_skill": "\n".join(
+            part for part in (project_type_description, project_query) if part
+        ),
+        "strategy_skill": str(issue_abstraction.get("strategy_skill_query") or signature or issue).strip(),
     }
 
 
-def _merge_dimension_traces(
-    dimension_queries: dict[str, str],
-    dimension_traces: dict[str, dict[str, Any]],
+def _merge_skill_type_traces(
+    skill_type_queries: dict[str, str],
+    skill_type_traces: dict[str, dict[str, Any]],
     selected: list[DimensionSkill],
 ) -> dict[str, Any]:
     candidate_skill_ids: list[str] = []
@@ -545,13 +810,13 @@ def _merge_dimension_traces(
     match_reasons: dict[str, dict[str, Any]] = {}
     filtered_below_threshold: list[dict[str, Any]] = []
     notes: list[str] = ["issue_abstraction_used=true"]
-    for dimension, trace in dimension_traces.items():
+    for skill_type, trace in skill_type_traces.items():
         for skill_id in trace.get("candidate_skill_ids") or []:
             if skill_id not in candidate_skill_ids:
                 candidate_skill_ids.append(skill_id)
         for item in trace.get("top_scores") or []:
             if isinstance(item, dict):
-                top_scores.append({"query_dimension": dimension, **item})
+                top_scores.append({"query_skill_type": skill_type, **item})
         for skill_id, score in (trace.get("scores") or {}).items():
             try:
                 scores[skill_id] = max(float(score), float(scores.get(skill_id, 0.0)))
@@ -559,19 +824,19 @@ def _merge_dimension_traces(
                 scores.setdefault(skill_id, 0.0)
         for skill_id, reason in (trace.get("match_reasons") or {}).items():
             if isinstance(reason, dict):
-                match_reasons.setdefault(skill_id, {})[dimension] = reason
+                match_reasons.setdefault(skill_id, {})[skill_type] = reason
         for item in trace.get("filtered_below_threshold") or []:
             if isinstance(item, dict):
-                filtered_below_threshold.append({"query_dimension": dimension, **item})
+                filtered_below_threshold.append({"query_skill_type": skill_type, **item})
         for note in trace.get("notes") or []:
-            note_text = f"{dimension}: {note}"
+            note_text = f"{skill_type}: {note}"
             if note_text not in notes:
                 notes.append(note_text)
     return {
-        "query": "\n".join(f"{dimension}: {query}" for dimension, query in dimension_queries.items()),
-        "retrieval_mode": "abstracted_dimension_skill_retrieval_v1",
-        "dimension_queries": dimension_queries,
-        "dimension_traces": dimension_traces,
+        "query": "\n".join(f"{skill_type}: {query}" for skill_type, query in skill_type_queries.items()),
+        "retrieval_mode": "abstracted_skill_type_retrieval_v1",
+        "skill_type_queries": skill_type_queries,
+        "skill_type_traces": skill_type_traces,
         "candidate_skill_ids": candidate_skill_ids,
         "selected_skill_ids": [skill.skill_id for skill in selected],
         "top_scores": top_scores[:20],
@@ -633,40 +898,40 @@ def _unique_skill_id(existing: list[DimensionSkill], base: str) -> str:
     return f"{normalized}_{index}"
 
 
-def _build_dimension_slots(
+def _build_skill_type_slots(
     active_skills: list[DimensionSkill],
     matched_skills: list[dict[str, Any]],
     trace: dict[str, Any],
     *,
-    weak_limit_per_dimension: int = 2,
+    weak_limit_per_skill_type: int = 2,
 ) -> dict[str, Any]:
     active_by_id = {skill.skill_id: skill for skill in active_skills}
-    matched_by_dimension: dict[str, list[dict[str, Any]]] = {dimension: [] for dimension in DIMENSIONS}
+    matched_by_type: dict[str, list[dict[str, Any]]] = {skill_type: [] for skill_type in SKILL_TYPES}
     for skill in matched_skills:
-        dimension = skill.get("dimension") if skill.get("dimension") in DIMENSIONS else "general"
-        matched_by_dimension[dimension].append(skill)
+        skill_type = skill.get("skill_type")
+        if skill_type in SKILL_TYPES:
+            matched_by_type[skill_type].append(skill)
 
     scores = trace.get("scores", {})
     reasons = trace.get("match_reasons", {})
-    weak_by_dimension: dict[str, list[dict[str, Any]]] = {dimension: [] for dimension in DIMENSIONS}
+    weak_by_type: dict[str, list[dict[str, Any]]] = {skill_type: [] for skill_type in SKILL_TYPES}
     for item in trace.get("filtered_below_threshold", []) or []:
         skill_id = str(item.get("skill_id") or "")
         skill = active_by_id.get(skill_id)
         if not skill:
             continue
-        dimension = skill.dimension if skill.dimension in DIMENSIONS else "general"
         weak = skill.compact_dict(score=scores.get(skill_id, item.get("score")), match_reasons=reasons.get(skill_id, {}))
         weak["threshold"] = item.get("threshold")
-        weak_by_dimension[dimension].append(weak)
+        weak_by_type[skill.skill_type].append(weak)
 
     slots: dict[str, Any] = {}
-    for dimension in DIMENSIONS:
+    for skill_type in SKILL_TYPES:
         weak_candidates = sorted(
-            weak_by_dimension[dimension],
+            weak_by_type[skill_type],
             key=lambda skill: (-float(skill.get("score") or 0.0), skill.get("skill_id", "")),
-        )[:weak_limit_per_dimension]
+        )[:weak_limit_per_skill_type]
         matched = sorted(
-            matched_by_dimension[dimension],
+            matched_by_type[skill_type],
             key=lambda skill: (-float(skill.get("score") or 0.0), skill.get("skill_id", "")),
         )
         if matched:
@@ -675,17 +940,17 @@ def _build_dimension_slots(
             status = "weak"
         else:
             status = "missing"
-        slots[dimension] = {
-            "dimension": dimension,
+        slots[skill_type] = {
+            "skill_type": skill_type,
             "status": status,
             "matched_skills": matched,
             "weak_candidates": weak_candidates,
             "guidance": (
-                "update matched skill if this is the primary knowledge dimension"
+                "update the matched skill when it represents the same reusable concept"
                 if status == "matched"
-                else "update weak candidate only with clear evidence, otherwise create a new dimension skill"
+                else "update the weak candidate only when semantic identity is clear; otherwise create a new skill"
                 if status == "weak"
-                else "create a new dimension skill only if this is the primary transferable lesson"
+                else "create a new skill only when the case provides a transferable lesson of this type"
             ),
         }
     return slots

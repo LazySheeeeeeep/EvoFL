@@ -27,7 +27,7 @@ from evolutefl.skills import make_skill_bank  # noqa: E402
 
 DEFAULT_DATASETS = ("SWE-bench/SWE-bench", "princeton-nlp/SWE-bench", "SWE-bench/SWE-bench_Lite")
 DEFAULT_OUTPUT_DIR = "runs/swe_bench_15_compare_gpt5mini_20260622"
-DIMENSIONS = ("project_type", "fault_mode", "strategy_type", "general")
+SKILL_TYPES = ("project_skill", "strategy_skill")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 DIFF_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$")
 
@@ -721,20 +721,18 @@ def build_retrieval_rows(arm_dir: Path, metric_rows: list[dict[str, Any]]) -> li
     for case_dir in sorted((arm_dir / "cases").iterdir()):
         matched_path = case_dir / "matched_skills.json"
         matched = json.loads(matched_path.read_text(encoding="utf-8")) if matched_path.exists() else []
-        dimensions = sorted({skill.get("dimension", "unknown") for skill in matched})
-        counts = Counter(skill.get("dimension", "unknown") for skill in matched)
+        skill_types = sorted({skill.get("skill_type", "unknown") for skill in matched})
+        counts = Counter(skill.get("skill_type", "unknown") for skill in matched)
         metric = metric_by_case.get(case_dir.name, {})
         rows.append(
             {
                 "case": case_dir.name,
                 "matched_skill_count": len(matched),
-                "matched_dimensions": dimensions,
-                "matched_dimension_counts": dict(counts),
+                "matched_skill_types": skill_types,
+                "matched_skill_type_counts": dict(counts),
                 "has_any_skill": bool(matched),
-                "has_project_type": "project_type" in counts,
-                "has_fault_mode": "fault_mode" in counts,
-                "has_strategy_type": "strategy_type" in counts,
-                "has_general": "general" in counts,
+                "has_project_skill": "project_skill" in counts,
+                "has_strategy_skill": "strategy_skill" in counts,
                 "top1": bool(metric.get("top1")),
                 "top3": bool(metric.get("top3")),
                 "top5": bool(metric.get("top5")),
@@ -747,18 +745,18 @@ def build_retrieval_rows(arm_dir: Path, metric_rows: list[dict[str, Any]]) -> li
 
 def summarize_retrieval(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(rows)
-    dimension_success = {}
-    for dimension in DIMENSIONS:
-        key = f"has_{dimension}"
+    skill_type_success = {}
+    for skill_type in SKILL_TYPES:
+        key = f"has_{skill_type}"
         count = sum(1 for row in rows if row.get(key))
-        dimension_success[dimension] = {"count": count, "rate": count / total if total else 0.0}
+        skill_type_success[skill_type] = {"count": count, "rate": count / total if total else 0.0}
     return {
         "any_skill": summarize_group([row for row in rows if row["has_any_skill"]]),
         "no_skill": summarize_group([row for row in rows if not row["has_any_skill"]]),
-        "dimension_retrieval_success": dimension_success,
-        "by_dimension_accuracy": {
-            dimension: summarize_group([row for row in rows if row.get(f"has_{dimension}")])
-            for dimension in DIMENSIONS
+        "skill_type_retrieval_success": skill_type_success,
+        "by_skill_type_accuracy": {
+            skill_type: summarize_group([row for row in rows if row.get(f"has_{skill_type}")])
+            for skill_type in SKILL_TYPES
         },
         "matched_skill_count_distribution": dict(Counter(row["matched_skill_count"] for row in rows)),
     }

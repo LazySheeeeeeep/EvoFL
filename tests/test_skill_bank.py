@@ -7,94 +7,198 @@ from evolutefl.skills.bank import SkillBankV0
 
 
 def write_seed(path: Path) -> None:
-    path.write_text(
-        json.dumps(
-            {
-                "skill_id": "config_schema_v1",
-                "status": "active",
-                "version": 1,
-                "dimension": "fault_mode",
-                "value": "config_schema_mismatch",
-                "retrieval_text": "config schema option normalization default merge",
-                "skill": {
-                    "title": "Config schema mismatch",
-                    "trigger": "Use for config schema mismatches.",
-                    "knowledge": "Config mismatches often originate at schema normalization, option merge, or default handling boundaries.",
-                },
+    records = [
+        {
+            "skill_id": "project_config_adapter_v1",
+            "status": "active",
+            "version": 1,
+            "skill_type": "project_skill",
+            "scope": "architecture_family",
+            "value": "configuration_adapter",
+            "retrieval_text": "configuration adapter option normalization consumer boundary",
+            "skill": {
+                "title": "Configuration adapter boundary",
+                "trigger": "Use when external configuration is accepted before normalization.",
+                "knowledge": "Configuration adapters connect external options to normalized consumer state.",
             },
-            separators=(",", ":"),
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+        },
+        {
+            "skill_id": "strategy_path_trace_v1",
+            "status": "active",
+            "version": 1,
+            "skill_type": "strategy_skill",
+            "scope": "contextual",
+            "value": "producer_consumer_trace",
+            "retrieval_text": "trace option producer consumer first divergence ranking",
+            "skill": {
+                "title": "Producer-consumer tracing",
+                "trigger": "Use when an accepted value is ignored downstream.",
+                "knowledge": "Trace the value through producers and consumers and rank the first divergence.",
+            },
+        },
+    ]
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
 
-def test_search_for_explorer_returns_dimension_skills(tmpdir) -> None:
-    tmp_path = Path(str(tmpdir))
-    bank_path = tmp_path / "skills.jsonl"
+def test_search_for_explorer_returns_two_skill_types(tmpdir) -> None:
+    bank_path = Path(str(tmpdir)) / "skills.jsonl"
     write_seed(bank_path)
-    bank = SkillBankV0(bank_path)
-    result = bank.search_for_explorer("demo/repo", "config option default merge is ignored")
-    skill = result["matched_skills"][0]
-    assert skill["skill_id"] == "config_schema_v1"
-    assert "knowledge" in skill
-    assert "items" not in skill
-    assert result["dimension_slots"]["fault_mode"]["status"] == "matched"
-    assert result["dimension_slots"]["project_type"]["status"] == "missing"
-    assert result["skill_search_trace"]["dimension_slot_summary"]["fault_mode"] == "matched"
-
-
-def test_search_threshold_can_reject_weak_match(tmpdir) -> None:
-    tmp_path = Path(str(tmpdir))
-    bank_path = tmp_path / "skills.jsonl"
-    write_seed(bank_path)
-    bank = SkillBankV0(bank_path, min_score=4.0, project_type_min_score=6.0)
-    result = bank.search_for_explorer("demo/repo", "schema")
-    assert result["matched_skills"] == []
-    assert result["skill_search_trace"]["filtered_below_threshold"]
-    assert result["dimension_slots"]["fault_mode"]["status"] == "weak"
-    assert result["dimension_slots"]["fault_mode"]["weak_candidates"][0]["skill_id"] == "config_schema_v1"
-
-
-def test_search_for_explorer_can_use_issue_abstraction_dimension_query(tmpdir) -> None:
-    tmp_path = Path(str(tmpdir))
-    bank_path = tmp_path / "skills.jsonl"
-    write_seed(bank_path)
-    bank = SkillBankV0(bank_path, min_score=4.0)
+    bank = SkillBankV0(bank_path, project_skill_min_score=4.0)
     result = bank.search_for_explorer(
         "demo/repo",
-        "The concrete issue text does not share useful words.",
+        "configuration adapter option normalization consumer boundary ignored",
+    )
+    assert {skill["skill_type"] for skill in result["matched_skills"]} == {
+        "project_skill",
+        "strategy_skill",
+    }
+    assert result["skill_type_slots"]["project_skill"]["status"] == "matched"
+    assert result["skill_type_slots"]["strategy_skill"]["status"] == "matched"
+
+
+def test_search_uses_independent_abstraction_queries(tmpdir) -> None:
+    bank_path = Path(str(tmpdir)) / "skills.jsonl"
+    write_seed(bank_path)
+    bank = SkillBankV0(bank_path, min_score=3.0, project_skill_min_score=3.0)
+    result = bank.search_for_explorer(
+        "demo/repo",
+        "Concrete text without retrieval terms.",
         issue_abstraction={
-            "abstract_problem_signature": "configured option ignored before downstream use",
-            "project_type_query": "configuration pipeline repository",
-            "fault_mode_query": "config schema option normalization default merge",
-            "strategy_type_query": "trace option propagation to downstream consumer",
+            "abstract_problem_signature": "Configured value is ignored.",
+            "project_skill_query": "configuration adapter option normalization consumer boundary",
+            "strategy_skill_query": "trace option producer consumer first divergence ranking",
             "key_symptoms": ["configured option ignored"],
         },
     )
+    assert len(result["matched_skills"]) == 2
+    trace = result["skill_search_trace"]
+    assert trace["retrieval_mode"] == "abstracted_skill_type_retrieval_v1"
+    assert set(trace["skill_type_queries"]) == {"project_skill", "strategy_skill"}
 
-    assert result["matched_skills"][0]["skill_id"] == "config_schema_v1"
-    assert result["skill_search_trace"]["retrieval_mode"] == "abstracted_dimension_skill_retrieval_v1"
-    assert result["skill_search_trace"]["dimension_queries"]["fault_mode"] == "config schema option normalization default merge"
+
+def test_reflector_receives_strategy_top_k_below_explorer_threshold(tmpdir) -> None:
+    bank_path = Path(str(tmpdir)) / "skills.jsonl"
+    write_seed(bank_path)
+    bank = SkillBankV0(bank_path)
+    explorer_search = {
+        "matched_skills": [],
+        "skill_type_slots": {
+            "project_skill": {"status": "missing", "matched_skills": [], "weak_candidates": []},
+            "strategy_skill": {
+                "status": "weak",
+                "matched_skills": [],
+                "weak_candidates": [
+                    {
+                        "skill_id": "strategy_path_trace_v1",
+                        "skill_type": "strategy_skill",
+                        "scope": "contextual",
+                        "value": "producer_consumer_trace",
+                        "title": "Producer-consumer tracing",
+                        "trigger": "Use when an accepted value is ignored downstream.",
+                        "knowledge": "Trace the value through producers and consumers and rank the first divergence.",
+                        "retrieval_text": "trace option producer consumer first divergence ranking",
+                    }
+                ],
+            },
+        },
+        "skill_search_trace": {
+            "skill_type_queries": {
+                "project_skill": "project query",
+                "strategy_skill": "strategy query",
+            },
+            "skill_type_traces": {
+                "strategy_skill": {
+                    "top_scores": [
+                        {
+                            "skill_id": "strategy_path_trace_v1",
+                            "skill_type": "strategy_skill",
+                            "score": 0.31,
+                        }
+                    ]
+                }
+            },
+        },
+    }
+
+    context = bank.search_for_reflector(
+        "demo/repo",
+        "issue",
+        explorer_search=explorer_search,
+        strategy_candidate_limit=3,
+    )
+
+    assert context["matched_case_skills"] == []
+    assert [item["skill_id"] for item in context["strategy_dedup_candidates"]] == [
+        "strategy_path_trace_v1"
+    ]
+    assert context["strategy_dedup_candidates"][0]["retrieval_score"] == 0.31
+    assert context["strategy_dedup_candidates"][0]["candidate_roles"] == [
+        "strategy_skill_weak_candidate",
+        "strategy_semantic_dedup_candidate",
+    ]
+    assert context["candidate_target_skills"][0]["skill_id"] == "strategy_path_trace_v1"
+
+
+def test_reflector_prioritizes_exact_project_type_container(tmpdir) -> None:
+    bank_path = Path(str(tmpdir)) / "skills.jsonl"
+    write_seed(bank_path)
+    bank = SkillBankV0(bank_path, min_score=100.0, project_skill_min_score=100.0)
+    abstraction = {
+        "abstract_problem_signature": "A configured value is lost.",
+        "project_type_key": "configuration_adapter",
+        "project_type_description": "A system that adapts external configuration into normalized consumer state.",
+        "project_skill_query": "unrelated words that do not pass the Explorer threshold",
+        "strategy_skill_query": "unrelated strategy words",
+        "key_symptoms": [],
+    }
+    explorer_search = bank.search_for_explorer(
+        "demo/repo",
+        "issue",
+        issue_abstraction=abstraction,
+    )
+    assert explorer_search["matched_skills"] == []
+
+    context = bank.search_for_reflector(
+        "demo/repo",
+        "issue",
+        issue_abstraction=abstraction,
+        explorer_search=explorer_search,
+    )
+
+    assert context["project_type"] == {
+        "key": "configuration_adapter",
+        "description": "A system that adapts external configuration into normalized consumer state.",
+        "identity_query": "A system that adapts external configuration into normalized consumer state.",
+    }
+    assert context["project_identity_trace"]["query"] == (
+        "A system that adapts external configuration into normalized consumer state."
+    )
+    assert [item["skill_id"] for item in context["project_type_candidates"]][:1] == [
+        "project_config_adapter_v1"
+    ]
+    assert "project_type_exact_candidate" in context["project_type_candidates"][0]["candidate_roles"]
 
 
 def test_apply_update_create_replace_delete_and_preserve(tmpdir) -> None:
-    tmp_path = Path(str(tmpdir))
-    bank_path = tmp_path / "skills.jsonl"
+    bank_path = Path(str(tmpdir)) / "skills.jsonl"
     write_seed(bank_path)
     bank = SkillBankV0(bank_path)
     created = bank.apply_update(
         {
             "operation": "add",
-            "target": {"skill_id": None, "dimension": "strategy_type", "value": "path_contrast", "field": "skill.knowledge"},
-            "content": {
-                "text": "Path contrast bugs require comparing equivalent working and failing flows at their shared boundary.",
-                "title": "Path contrast",
-                "trigger": "Use for working/failing path mismatch.",
-                "retrieval_text": "path compare mismatch working failing boundary",
+            "target": {
+                "skill_id": None,
+                "skill_type": "strategy_skill",
+                "scope": "global",
+                "value": "parallel_path_contrast",
+                "field": "skill.knowledge",
             },
-            "source_cases": ["case1"],
-            "outcome_type": "failure",
+            "content": {
+                "text": "Compare equivalent paths at their shared boundary and rank the first divergence.",
+                "title": "Parallel path contrast",
+                "trigger": "Use when equivalent paths behave differently.",
+                "retrieval_text": "parallel path compare shared boundary first divergence",
+            },
         }
     )
     assert created["action"] == "create_new"
@@ -102,89 +206,57 @@ def test_apply_update_create_replace_delete_and_preserve(tmpdir) -> None:
     replaced = bank.apply_update(
         {
             "operation": "replace",
-            "target": {"skill_id": "config_schema_v1", "dimension": "fault_mode", "value": "config_schema_mismatch", "field": "skill.knowledge"},
-            "content": {
-                "old_text": "Config mismatches often originate at schema normalization, option merge, or default handling boundaries.",
-                "new_text": "Config mismatches often originate at schema normalization, option merge, type conversion, or default handling boundaries.",
+            "target": {
+                "skill_id": "project_config_adapter_v1",
+                "skill_type": "project_skill",
+                "scope": "architecture_family",
+                "value": "configuration_adapter",
+                "field": "skill.knowledge",
             },
-            "source_cases": ["case2"],
-            "outcome_type": "failure",
+            "content": {
+                "old_text": "Configuration adapters connect external options to normalized consumer state.",
+                "new_text": "Configuration adapters connect external options to normalized state consumed by downstream components.",
+            },
         }
     )
     assert replaced["action"] == "replace"
-    active = {skill.skill_id: skill for skill in bank.active_skills()}
-    assert active["config_schema_v1"].version == 2
-    assert "type conversion" in active["config_schema_v1"].knowledge
+    assert {skill.skill_type for skill in bank.active_skills()} == {"project_skill", "strategy_skill"}
 
-    deleted = bank.apply_update(
-        {
-            "operation": "delete",
-            "target": {"skill_id": "config_schema_v1", "dimension": "fault_mode", "value": "config_schema_mismatch", "field": "skill.knowledge"},
-            "content": {"text": "type conversion, "},
-            "source_cases": ["case3"],
-            "outcome_type": "failure",
-        }
-    )
-    assert deleted["action"] == "delete"
     preserved = bank.apply_update(
         {
             "operation": "preserve",
-            "target": {"skill_id": "config_schema_v1", "dimension": "fault_mode", "value": "config_schema_mismatch", "field": "skill.knowledge"},
-            "source_cases": ["case4"],
-            "outcome_type": "success",
+            "target": {
+                "skill_id": "strategy_path_trace_v1",
+                "skill_type": "strategy_skill",
+                "scope": "contextual",
+                "value": "producer_consumer_trace",
+            },
         }
     )
     assert preserved["action"] == "preserve"
 
 
-def test_active_skills_keep_only_latest_record_per_skill_id(tmpdir) -> None:
-    tmp_path = Path(str(tmpdir))
-    bank_path = tmp_path / "skills.jsonl"
+def test_load_skips_obsolete_fault_mode_records(tmpdir) -> None:
+    bank_path = Path(str(tmpdir)) / "skills.jsonl"
     records = [
         {
-            "skill_id": "duplicate_v1",
+            "skill_id": "obsolete_fault",
             "status": "active",
             "version": 1,
             "dimension": "fault_mode",
-            "value": "old_value",
-            "retrieval_text": "old",
-            "skill": {
-                "title": "Old",
-                "trigger": "old trigger",
-                "knowledge": "old knowledge",
-            },
+            "value": "old",
+            "skill": {"title": "Old", "trigger": "Old", "knowledge": "Old"},
         },
         {
-            "skill_id": "duplicate_v1",
-            "status": "superseded",
-            "version": 1,
-            "dimension": "fault_mode",
-            "value": "old_value",
-            "retrieval_text": "old",
-            "skill": {
-                "title": "Old",
-                "trigger": "old trigger",
-                "knowledge": "old knowledge",
-            },
-        },
-        {
-            "skill_id": "duplicate_v1",
+            "skill_id": "legacy_strategy",
             "status": "active",
-            "version": 2,
+            "version": 1,
             "dimension": "strategy_type",
-            "value": "new_value",
-            "retrieval_text": "new",
-            "skill": {
-                "title": "New",
-                "trigger": "new trigger",
-                "knowledge": "new knowledge",
-            },
+            "value": "trace",
+            "skill": {"title": "Trace", "trigger": "Use for tracing.", "knowledge": "Trace evidence."},
         },
     ]
     bank_path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
-
     active = SkillBankV0(bank_path).active_skills()
-
     assert len(active) == 1
-    assert active[0].version == 2
-    assert active[0].dimension == "strategy_type"
+    assert active[0].skill_type == "strategy_skill"
