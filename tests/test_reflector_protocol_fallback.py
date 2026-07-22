@@ -17,7 +17,7 @@ def test_reflector_protocol_failure_returns_no_update(tmpdir) -> None:
         output_path=str(output_path),
     )
 
-    assert output["materialized_edits"] == []
+    assert output["materialized_updates"] == []
     assert set(output["skill_updates"]) == {"project_skill", "strategy_skill"}
     assert output["optimization_intent"] == "no_update"
     assert "protocol failed" in output["no_update_reason"]

@@ -30,12 +30,7 @@ class EmbeddingRetrievalConfig:
 
 
 def skill_embedding_text(skill: DimensionSkill) -> str:
-    """Return the compact retrieval view used for first-stage embedding search.
-
-    Keep the full knowledge body out of this text. Explorer retrieval should
-    decide whether an issue triggers a skill, then load the richer skill body
-    only after selection.
-    """
+    """Return the canonical skill content used for embedding retrieval."""
 
     parts = [
         f"skill_type: {skill.skill_type}",
@@ -43,7 +38,7 @@ def skill_embedding_text(skill: DimensionSkill) -> str:
         f"value: {skill.value}",
         f"title: {skill.title}",
         f"trigger: {skill.trigger}",
-        f"retrieval_text: {skill.retrieval_text}",
+        f"knowledge: {skill.knowledge}",
     ]
     return "\n".join(part for part in parts if part.strip())
 

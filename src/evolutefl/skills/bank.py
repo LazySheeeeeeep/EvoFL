@@ -19,7 +19,6 @@ from .schema import (
     SKILL_TYPES,
     DimensionSkill,
     UnsupportedLegacySkillError,
-    build_retrieval_text,
     slugify,
 )
 
@@ -569,31 +568,21 @@ class SkillBankV0:
             trace.setdefault("notes", []).append(f"Embedding retrieval failed: {exc}")
             return selected, trace
 
-    def apply_update(self, edit: dict[str, Any]) -> dict[str, Any]:
-        operation = edit.get("operation")
+    def apply_update(self, update: dict[str, Any]) -> dict[str, Any]:
+        operation = update.get("operation")
         if operation == "preserve":
-            return self._apply_preserve(edit)
-        if operation == "add" and not (edit.get("target") or {}).get("skill_id"):
-            return self._apply_create_new(edit)
-        if operation in ("add", "replace", "delete"):
-            return self._apply_modify_existing(edit)
-        raise ValueError(f"Unsupported skill edit operation: {operation!r}")
+            return self._apply_preserve(update)
+        if operation == "create":
+            return self._apply_create_new(update)
+        if operation == "rewrite":
+            return self._apply_rewrite_existing(update)
+        raise ValueError(f"Unsupported skill update operation: {operation!r}")
 
-    def _apply_create_new(self, edit: dict[str, Any]) -> dict[str, Any]:
-        target = edit.get("target") or {}
-        skill_type = _valid_skill_type(target.get("skill_type"))
-        scope = _valid_scope(skill_type, target.get("scope"))
-        value = str(target.get("value") or "unknown")
-        content = edit.get("content") or {}
-        text = str(content.get("text") or content.get("new_text") or "").strip()
-        if not text:
-            raise ValueError("add edit requires content.text for new skill.")
-        title = str(content.get("title") or _title_from_value(value))
-        trigger = str(content.get("trigger") or f"Use when the issue matches {value.replace('_', ' ')} localization patterns.")
-        retrieval_text = str(
-            content.get("retrieval_text")
-            or build_retrieval_text(title, trigger, skill_type, value, scope)
-        )
+    def _apply_create_new(self, update: dict[str, Any]) -> dict[str, Any]:
+        skill_type = _valid_skill_type(update.get("skill_type"))
+        content = _valid_complete_skill(update.get("skill"), skill_type)
+        scope = content["scope"]
+        value = content["value"]
         existing = self.load()
         skill_id = _unique_skill_id(existing, f"{skill_type}_{value}_v1")
         skill = DimensionSkill(
@@ -603,10 +592,9 @@ class SkillBankV0:
             skill_type=skill_type,
             scope=scope,
             value=value,
-            retrieval_text=retrieval_text,
-            title=title,
-            trigger=trigger,
-            knowledge=text,
+            title=content["title"],
+            trigger=content["trigger"],
+            knowledge=content["knowledge"],
         )
         records = read_jsonl(self.path)
         records.append(skill.to_dict())
@@ -618,28 +606,29 @@ class SkillBankV0:
             "embedding_cache": self._warm_embedding_for_skill(skill),
         }
 
-    def _apply_modify_existing(self, edit: dict[str, Any]) -> dict[str, Any]:
-        target = edit.get("target") or {}
-        target_skill_id = str(target.get("skill_id") or "")
+    def _apply_rewrite_existing(self, update: dict[str, Any]) -> dict[str, Any]:
+        target_skill_id = str(update.get("target_skill_id") or "")
         if not target_skill_id:
-            raise ValueError(f"{edit.get('operation')} edit requires target.skill_id.")
+            raise ValueError("rewrite update requires target_skill_id.")
         old = {skill.skill_id: skill for skill in self.active_skills()}.get(target_skill_id)
         if not old:
-            raise ValueError(f"No active skill found for target.skill_id={target_skill_id!r}.")
+            raise ValueError(f"No active skill found for target_skill_id={target_skill_id!r}.")
 
-        new_skill = deepcopy(old)
-        new_skill.version = old.version + 1
-        field = str(target.get("field") or "skill.knowledge")
-        operation = str(edit.get("operation"))
-        _apply_text_edit(new_skill, field, operation, edit.get("content") or {})
-        if not new_skill.retrieval_text:
-            new_skill.retrieval_text = build_retrieval_text(
-                new_skill.title,
-                new_skill.trigger,
-                new_skill.skill_type,
-                new_skill.value,
-                new_skill.scope,
-            )
+        skill_type = _valid_skill_type(update.get("skill_type"))
+        if old.skill_type != skill_type:
+            raise ValueError("rewrite update must preserve the target skill_type.")
+        content = _valid_complete_skill(update.get("skill"), skill_type)
+        new_skill = DimensionSkill(
+            skill_id=old.skill_id,
+            status="active",
+            version=old.version + 1,
+            skill_type=skill_type,
+            scope=content["scope"],
+            value=content["value"],
+            title=content["title"],
+            trigger=content["trigger"],
+            knowledge=content["knowledge"],
+        )
 
         superseded = deepcopy(old)
         superseded.status = "superseded"
@@ -649,16 +638,14 @@ class SkillBankV0:
         records.append(new_skill.to_dict())
         write_jsonl(self.path, records)
         return {
-            "action": operation,
+            "action": "rewrite",
             "updated_skill_id": new_skill.skill_id,
             "version": new_skill.version,
-            "field": field,
             "embedding_cache": self._warm_embedding_for_skill(new_skill),
         }
 
-    def _apply_preserve(self, edit: dict[str, Any]) -> dict[str, Any]:
-        target = edit.get("target") or {}
-        target_skill_id = str(target.get("skill_id") or "")
+    def _apply_preserve(self, update: dict[str, Any]) -> dict[str, Any]:
+        target_skill_id = str(update.get("target_skill_id") or "")
         if not target_skill_id:
             return {"action": "preserve", "updated_skill_id": None, "reason": "preserve edit has no target skill"}
         old = {skill.skill_id: skill for skill in self.active_skills()}.get(target_skill_id)
@@ -704,6 +691,22 @@ def _valid_scope(skill_type: str, value: Any) -> str:
     if scope not in allowed[skill_type]:
         raise ValueError(f"Invalid scope {scope!r} for {skill_type}.")
     return scope
+
+
+def _valid_complete_skill(value: Any, skill_type: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("create/rewrite update requires a complete skill object.")
+    normalized = {
+        "scope": _valid_scope(skill_type, value.get("scope")),
+        "value": str(value.get("value") or "").strip(),
+        "title": str(value.get("title") or "").strip(),
+        "trigger": str(value.get("trigger") or "").strip(),
+        "knowledge": str(value.get("knowledge") or "").strip(),
+    }
+    missing = [key for key in ("value", "title", "trigger", "knowledge") if not normalized[key]]
+    if missing:
+        raise ValueError(f"Complete skill object missing: {', '.join(missing)}")
+    return normalized
 
 
 def _valid_retrieval_mode(value: Any) -> str:
@@ -845,46 +848,6 @@ def _merge_skill_type_traces(
         "filtered_below_threshold": filtered_below_threshold,
         "notes": notes,
     }
-
-
-def _apply_text_edit(skill: DimensionSkill, field: str, operation: str, content: dict[str, Any]) -> None:
-    text = str(content.get("text") or "").strip()
-    old_text = str(content.get("old_text") or "").strip()
-    new_text = str(content.get("new_text") or text).strip()
-    if field == "skill.knowledge":
-        skill.knowledge = _edit_string(skill.knowledge, operation, text=text, old_text=old_text, new_text=new_text)
-    elif field == "skill.trigger":
-        skill.trigger = _edit_string(skill.trigger, operation, text=text, old_text=old_text, new_text=new_text)
-    elif field == "retrieval_text":
-        skill.retrieval_text = _edit_string(skill.retrieval_text, operation, text=text, old_text=old_text, new_text=new_text)
-    else:
-        raise ValueError(f"Unsupported edit target field: {field!r}")
-
-
-def _edit_string(current: str, operation: str, *, text: str, old_text: str, new_text: str) -> str:
-    if operation == "add":
-        addition = text or new_text
-        if not addition:
-            raise ValueError("add edit requires text.")
-        return f"{current.rstrip()}\n\n{addition}".strip() if current else addition
-    if operation == "replace":
-        if not old_text or not new_text:
-            raise ValueError("replace edit requires exact old_text and new_text.")
-        if old_text not in current:
-            raise ValueError("replace edit old_text was not found in target.")
-        return current.replace(old_text, new_text, 1)
-    if operation == "delete":
-        target = text or old_text
-        if not target:
-            raise ValueError("delete edit requires text or old_text.")
-        if target not in current:
-            raise ValueError("delete edit text was not found in target.")
-        return current.replace(target, "").strip()
-    raise ValueError(f"Unsupported string operation: {operation!r}")
-
-
-def _title_from_value(value: str) -> str:
-    return value.replace("_", " ").strip().title() or "Localization Knowledge"
 
 
 def _unique_skill_id(existing: list[DimensionSkill], base: str) -> str:

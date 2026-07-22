@@ -41,7 +41,6 @@ class DimensionSkill:
     skill_type: str
     scope: str
     value: str
-    retrieval_text: str
     title: str
     trigger: str
     knowledge: str
@@ -75,10 +74,6 @@ class DimensionSkill:
         knowledge = str(skill_block.get("knowledge") or "").strip()
         if not title or not trigger or not knowledge:
             raise ValueError(f"Skill {skill_id} missing title/trigger/knowledge.")
-        retrieval_text = str(
-            normalized.get("retrieval_text")
-            or build_retrieval_text(title, trigger, skill_type, value, scope)
-        )
         return cls(
             skill_id=skill_id,
             status=status,
@@ -86,7 +81,6 @@ class DimensionSkill:
             skill_type=skill_type,
             scope=scope,
             value=value,
-            retrieval_text=retrieval_text,
             title=title,
             trigger=trigger,
             knowledge=knowledge,
@@ -100,7 +94,6 @@ class DimensionSkill:
             "skill_type": self.skill_type,
             "scope": self.scope,
             "value": self.value,
-            "retrieval_text": self.retrieval_text,
             "skill": {
                 "title": self.title,
                 "trigger": self.trigger,
@@ -122,23 +115,10 @@ class DimensionSkill:
             "skill_type": self.skill_type,
             "scope": self.scope,
             "value": self.value,
-            "retrieval_text": self.retrieval_text,
             "title": self.title,
             "trigger": self.trigger,
             "knowledge": self.knowledge,
         }
-
-
-def build_retrieval_text(
-    title: str,
-    trigger: str,
-    skill_type: str,
-    value: str,
-    scope: str = "",
-) -> str:
-    parts = [title, trigger, skill_type, scope, value]
-    return " ".join(part for part in parts if part)
-
 
 def migrate_legacy_skill(record: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(record)
@@ -174,14 +154,10 @@ def migrate_legacy_skill(record: dict[str, Any]) -> dict[str, Any]:
     normalized.pop("dimension", None)
 
     normalized.setdefault("value", "unknown")
-    if not normalized.get("retrieval_text"):
-        normalized["retrieval_text"] = build_retrieval_text(
-            str(skill_block.get("title") or ""),
-            str(skill_block.get("trigger") or ""),
-            skill_type,
-            str(normalized.get("value") or "unknown"),
-            str(normalized.get("scope") or ""),
-        )
+    # Old records may contain a separately maintained retrieval_text. It is
+    # intentionally discarded: title, trigger, and knowledge are now the
+    # canonical retrieval document and are rewritten atomically.
+    normalized.pop("retrieval_text", None)
     normalized.setdefault("status", "active")
     normalized.setdefault("version", 1)
     normalized.pop("taxonomy", None)

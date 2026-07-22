@@ -37,11 +37,10 @@ def _write_skill(path: Path) -> None:
                 "skill_type": "project_skill",
                 "scope": "architecture_family",
                 "value": "configuration_adapter",
-                "retrieval_text": "configuration schema normalization default merge",
                 "skill": {
                     "title": "Config schema mismatch",
                     "trigger": "Use for config schema mismatch.",
-                    "knowledge": "Inspect config schema normalization before downstream consumers.",
+                    "knowledge": "Inspect config schema normalization and default merge behavior before downstream consumers.",
                 },
             }
         )
@@ -106,7 +105,7 @@ def test_embedding_retrieval_can_explicitly_fallback_to_lexical_when_unconfigure
     assert result["skill_search_trace"]["retrieval_mode"] == "embedding_unconfigured_fallback_to_lexical_v1"
 
 
-def test_skill_embedding_text_uses_compact_retrieval_view() -> None:
+def test_skill_embedding_text_uses_complete_canonical_skill() -> None:
     text = skill_embedding_text(
         DimensionSkill(
             skill_id="project_config_adapter_v1",
@@ -115,16 +114,14 @@ def test_skill_embedding_text_uses_compact_retrieval_view() -> None:
             skill_type="project_skill",
             scope="architecture_family",
             value="configuration_adapter",
-            retrieval_text="configuration schema normalization default merge",
             title="Config schema mismatch",
             trigger="Use for config schema mismatch.",
-            knowledge="Very long case-specific knowledge that should be loaded after retrieval, not embedded.",
+            knowledge="Inspect configuration schema normalization before downstream consumers.",
         )
     )
 
-    assert "retrieval_text: configuration schema normalization default merge" in text
-    assert "knowledge:" not in text
-    assert "anti_patterns:" not in text
+    assert "knowledge: Inspect configuration schema normalization before downstream consumers." in text
+    assert "retrieval_text:" not in text
 
 
 def test_apply_update_warms_embedding_cache_when_client_configured(tmpdir) -> None:
@@ -142,18 +139,15 @@ def test_apply_update_warms_embedding_cache_when_client_configured(tmpdir) -> No
 
     result = bank.apply_update(
         {
-            "operation": "add",
-            "target": {
-                "skill_id": None,
-                "skill_type": "project_skill",
+            "operation": "create",
+            "skill_type": "project_skill",
+            "target_skill_id": None,
+            "skill": {
                 "scope": "architecture_family",
                 "value": "configuration_adapter",
-            },
-            "content": {
                 "title": "Config schema",
                 "trigger": "Use for config schema bugs.",
-                "text": "Inspect schema normalization before consumers.",
-                "retrieval_text": "config schema normalization",
+                "knowledge": "Inspect schema normalization before consumers.",
             },
             "source_cases": ["case1"],
             "outcome_type": "failure",
@@ -177,7 +171,6 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
             "skill_type": "project_skill",
             "scope": "architecture_family",
             "value": "configuration_adapter",
-            "retrieval_text": "old config schema",
             "skill": {
                 "title": "Old config schema",
                 "trigger": "Use for old config schema bugs.",
@@ -191,7 +184,6 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
             "skill_type": "project_skill",
             "scope": "architecture_family",
             "value": "configuration_adapter",
-            "retrieval_text": "new config schema",
             "skill": {
                 "title": "New config schema",
                 "trigger": "Use for new config schema bugs.",

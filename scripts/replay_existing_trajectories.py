@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
                     "decisions": decisions,
                     "updated_skill_ids": evolution.get("updated_skill_ids", []),
                     "updated_skill_types": evolution.get("updated_skill_types", []),
-                    "failed_edits": evolution.get("failed_edits", []),
+                    "failed_updates": evolution.get("failed_updates", []),
                 }
             )
             if args.rebuild_embeddings_after_case:

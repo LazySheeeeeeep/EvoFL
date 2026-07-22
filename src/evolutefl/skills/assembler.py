@@ -42,7 +42,6 @@ def assemble_skill_context(
                 "skill_type": skill_type,
                 "scope": skill.get("scope", ""),
                 "value": skill.get("value", "unknown"),
-                "retrieval_text": skill.get("retrieval_text", ""),
             }
         )
 

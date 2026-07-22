@@ -148,7 +148,6 @@ def test_explorer_injects_one_structured_skill_context_without_duplicates(tmpdir
                 "skill_type": "strategy_skill",
                 "scope": "contextual",
                 "value": "producer_consumer_trace",
-                "retrieval_text": "producer consumer trace ignored downstream",
                 "skill": {
                     "title": "Producer-consumer tracing",
                     "trigger": "Use when a producer value is ignored downstream.",

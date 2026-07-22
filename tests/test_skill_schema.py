@@ -26,6 +26,7 @@ def test_new_project_skill_schema_round_trip() -> None:
     saved = skill.to_dict()
     assert saved["skill_type"] == "project_skill"
     assert "dimension" not in saved
+    assert "retrieval_text" not in saved
     assert skill.compact_dict()["scope"] == "architecture_family"
 
 

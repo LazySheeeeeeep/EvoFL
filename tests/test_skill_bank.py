@@ -15,7 +15,6 @@ def write_seed(path: Path) -> None:
             "skill_type": "project_skill",
             "scope": "architecture_family",
             "value": "configuration_adapter",
-            "retrieval_text": "configuration adapter option normalization consumer boundary",
             "skill": {
                 "title": "Configuration adapter boundary",
                 "trigger": "Use when external configuration is accepted before normalization.",
@@ -29,7 +28,6 @@ def write_seed(path: Path) -> None:
             "skill_type": "strategy_skill",
             "scope": "contextual",
             "value": "producer_consumer_trace",
-            "retrieval_text": "trace option producer consumer first divergence ranking",
             "skill": {
                 "title": "Producer-consumer tracing",
                 "trigger": "Use when an accepted value is ignored downstream.",
@@ -46,7 +44,7 @@ def test_search_for_explorer_returns_two_skill_types(tmpdir) -> None:
     bank = SkillBankV0(bank_path, project_skill_min_score=4.0)
     result = bank.search_for_explorer(
         "demo/repo",
-        "configuration adapter option normalization consumer boundary ignored",
+        "configuration adapter option normalization consumer boundary ignored trace producer first divergence",
     )
     assert {skill["skill_type"] for skill in result["matched_skills"]} == {
         "project_skill",
@@ -96,7 +94,6 @@ def test_reflector_receives_strategy_top_k_below_explorer_threshold(tmpdir) -> N
                         "title": "Producer-consumer tracing",
                         "trigger": "Use when an accepted value is ignored downstream.",
                         "knowledge": "Trace the value through producers and consumers and rank the first divergence.",
-                        "retrieval_text": "trace option producer consumer first divergence ranking",
                     }
                 ],
             },
@@ -179,58 +176,52 @@ def test_reflector_prioritizes_exact_project_type_container(tmpdir) -> None:
     assert "project_type_exact_candidate" in context["project_type_candidates"][0]["candidate_roles"]
 
 
-def test_apply_update_create_replace_delete_and_preserve(tmpdir) -> None:
+def test_apply_update_create_rewrite_and_preserve(tmpdir) -> None:
     bank_path = Path(str(tmpdir)) / "skills.jsonl"
     write_seed(bank_path)
     bank = SkillBankV0(bank_path)
     created = bank.apply_update(
         {
-            "operation": "add",
-            "target": {
-                "skill_id": None,
-                "skill_type": "strategy_skill",
+            "operation": "create",
+            "skill_type": "strategy_skill",
+            "target_skill_id": None,
+            "skill": {
                 "scope": "global",
                 "value": "parallel_path_contrast",
-                "field": "skill.knowledge",
-            },
-            "content": {
-                "text": "Compare equivalent paths at their shared boundary and rank the first divergence.",
                 "title": "Parallel path contrast",
                 "trigger": "Use when equivalent paths behave differently.",
-                "retrieval_text": "parallel path compare shared boundary first divergence",
+                "knowledge": "Compare equivalent paths at their shared boundary and rank the first divergence.",
             },
         }
     )
     assert created["action"] == "create_new"
 
-    replaced = bank.apply_update(
+    rewritten = bank.apply_update(
         {
-            "operation": "replace",
-            "target": {
-                "skill_id": "project_config_adapter_v1",
-                "skill_type": "project_skill",
+            "operation": "rewrite",
+            "skill_type": "project_skill",
+            "target_skill_id": "project_config_adapter_v1",
+            "skill": {
                 "scope": "architecture_family",
                 "value": "configuration_adapter",
-                "field": "skill.knowledge",
-            },
-            "content": {
-                "old_text": "Configuration adapters connect external options to normalized consumer state.",
-                "new_text": "Configuration adapters connect external options to normalized state consumed by downstream components.",
+                "title": "Configuration adapter boundary",
+                "trigger": "Use when external configuration is accepted before normalization.",
+                "knowledge": "Configuration adapters connect external options to normalized state consumed by downstream components.",
             },
         }
     )
-    assert replaced["action"] == "replace"
+    assert rewritten["action"] == "rewrite"
+    rewritten_skill = {skill.skill_id: skill for skill in bank.active_skills()}["project_config_adapter_v1"]
+    assert rewritten_skill.version == 2
+    assert "downstream components" in rewritten_skill.knowledge
     assert {skill.skill_type for skill in bank.active_skills()} == {"project_skill", "strategy_skill"}
 
     preserved = bank.apply_update(
         {
             "operation": "preserve",
-            "target": {
-                "skill_id": "strategy_path_trace_v1",
-                "skill_type": "strategy_skill",
-                "scope": "contextual",
-                "value": "producer_consumer_trace",
-            },
+            "skill_type": "strategy_skill",
+            "target_skill_id": "strategy_path_trace_v1",
+            "skill": None,
         }
     )
     assert preserved["action"] == "preserve"

@@ -62,7 +62,7 @@ def run_case_evolution(
         "repo": repo,
         "outcome": outcome,
         "legacy_insight": legacy_insight,
-        "applied_edits": [],
+        "applied_updates": [],
         "updated_skill_ids": [],
     }
     if not eligible:
@@ -155,24 +155,24 @@ def run_case_evolution(
     )
     write_json(out_dir / "reflector_output.json", reflector_output)
 
-    applied_edits: list[dict[str, Any]] = []
-    failed_edits: list[dict[str, Any]] = []
-    for edit in reflector_output.get("materialized_edits", []):
+    applied_updates: list[dict[str, Any]] = []
+    failed_updates: list[dict[str, Any]] = []
+    for update in reflector_output.get("materialized_updates", []):
         try:
-            applied = bank.apply_update(edit)
-            applied_edits.append(applied)
-        except Exception as exc:  # noqa: BLE001 - keep exact edit semantics but isolate bad edits.
-            failed_edits.append(
+            applied = bank.apply_update(update)
+            applied_updates.append(applied)
+        except Exception as exc:  # noqa: BLE001 - isolate an invalid atomic update.
+            failed_updates.append(
                 {
-                    "edit_id": edit.get("edit_id"),
-                    "operation": edit.get("operation"),
-                    "target": edit.get("target"),
+                    "update_id": update.get("update_id"),
+                    "operation": update.get("operation"),
+                    "target_skill_id": update.get("target_skill_id"),
                     "error": str(exc),
                 }
             )
-    write_json(out_dir / "applied_edits.json", applied_edits)
-    write_json(out_dir / "failed_edits.json", failed_edits)
-    write_json(out_dir / "skill_bank_delta.json", applied_edits)
+    write_json(out_dir / "applied_updates.json", applied_updates)
+    write_json(out_dir / "failed_updates.json", failed_updates)
+    write_json(out_dir / "skill_bank_delta.json", applied_updates)
 
     summary.update(
         {
@@ -181,12 +181,11 @@ def run_case_evolution(
             "trajectory_evidence": trajectory_evidence,
             "reflector_output": reflector_output,
             "skill_updates": reflector_output.get("skill_updates"),
-            "applied_edits": applied_edits,
-            "failed_edits": failed_edits,
+            "applied_updates": applied_updates,
+            "failed_updates": failed_updates,
             "outcome_type": outcome.get("label"),
-            "updated_skill_ids": [item.get("updated_skill_id") for item in applied_edits if item.get("updated_skill_id")],
-            "updated_skill_types": _updated_skill_types_from_edits(reflector_output.get("materialized_edits", [])),
-            "edited_fields": [item.get("field") for item in applied_edits if item.get("field")],
+            "updated_skill_ids": [item.get("updated_skill_id") for item in applied_updates if item.get("updated_skill_id")],
+            "updated_skill_types": _updated_skill_types_from_updates(reflector_output.get("materialized_updates", [])),
             "no_update_reason": reflector_output.get("no_update_reason"),
         }
     )
@@ -337,19 +336,18 @@ def _build_trajectory_evidence(
 
 def _policy_hint(outcome: dict[str, Any], has_relevant_skill: bool) -> str:
     if outcome.get("label") == "success" and has_relevant_skill:
-        return "Success with relevant retrieved skill: prefer preserve or no_update; expand text only for a clear reusable missing pattern."
+        return "Success with a relevant retrieved skill: preserve it unless the case supports a coherent full-card rewrite."
     if outcome.get("label") == "success":
         return "Success without relevant retrieved skill: create only if the trajectory reveals transferable localization knowledge."
     if has_relevant_skill:
-        return "Failure with relevant retrieved skill: prefer replace/add/delete on the existing skill over creating a new one."
+        return "Failure with a relevant retrieved skill: rewrite it only when semantic identity is unchanged; otherwise create or no_update."
     return "Failure without relevant retrieved skill: create only if the lesson is transferable; otherwise no_update."
 
 
-def _updated_skill_types_from_edits(edits: list[dict[str, Any]]) -> list[str]:
+def _updated_skill_types_from_updates(updates: list[dict[str, Any]]) -> list[str]:
     skill_types: list[str] = []
-    for edit in edits:
-        target = edit.get("target") if isinstance(edit, dict) else {}
-        skill_type = target.get("skill_type") if isinstance(target, dict) else None
+    for update in updates:
+        skill_type = update.get("skill_type") if isinstance(update, dict) else None
         if skill_type and skill_type not in skill_types:
             skill_types.append(str(skill_type))
     return skill_types

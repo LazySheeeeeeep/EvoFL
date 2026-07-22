@@ -44,11 +44,9 @@ def _config(skill_path: Path) -> dict:
 def _no_update() -> dict:
     return {
         "decision": "no_update",
-        "scope": None,
-        "target_value": "unknown",
         "target_skill_id": None,
         "rationale": "No reusable lesson for this skill type.",
-        "edit": None,
+        "skill": None,
         "no_update_reason": "No reusable lesson for this skill type.",
     }
 
@@ -76,19 +74,14 @@ def test_case_evolution_failure_creates_strategy_skill(tmpdir) -> None:
             "project_skill": _no_update(),
             "strategy_skill": {
                 "decision": "create_new",
-                "scope": "global",
-                "target_value": "root_cause_before_reporter",
                 "target_skill_id": None,
                 "rationale": "The trajectory exposes a reusable ranking policy.",
-                "edit": {
-                    "operation": "add",
-                    "field": "skill.knowledge",
-                    "content": {
-                        "text": "Rank the first evidence-backed state producer above functions that only propagate or report the symptom.",
-                        "title": "Root cause before reporter",
-                        "trigger": "Use when reporters are related to the symptom but do not create the invalid state.",
-                        "retrieval_text": "state producer downstream reporter causal ranking",
-                    },
+                "skill": {
+                    "scope": "global",
+                    "value": "root_cause_before_reporter",
+                    "title": "Root cause before reporter",
+                    "trigger": "Use when reporters are related to the symptom but do not create the invalid state.",
+                    "knowledge": "Rank the first evidence-backed state producer above functions that only propagate or report the symptom.",
                 },
                 "no_update_reason": None,
             },
@@ -128,7 +121,6 @@ def test_case_evolution_success_can_preserve_strategy_skill(tmpdir) -> None:
                 "skill_type": "strategy_skill",
                 "scope": "global",
                 "value": "root_cause_before_reporter",
-                "retrieval_text": "root cause ranking reporter producer symptom cause",
                 "skill": {
                     "title": "Root cause ranking",
                     "trigger": "Use when symptom reporters compete with state producers.",
@@ -146,11 +138,9 @@ def test_case_evolution_success_can_preserve_strategy_skill(tmpdir) -> None:
             "project_skill": _no_update(),
             "strategy_skill": {
                 "decision": "preserve_existing",
-                "scope": "global",
-                "target_value": "root_cause_before_reporter",
                 "target_skill_id": "strategy_root_cause_v1",
                 "rationale": "The retrieved strategy explains the successful ranking.",
-                "edit": None,
+                "skill": None,
                 "no_update_reason": None,
             },
         },
@@ -166,7 +156,7 @@ def test_case_evolution_success_can_preserve_strategy_skill(tmpdir) -> None:
         ground_truth_functions=["right.py::producer"],
     )
     assert summary["eligible"] is True
-    assert summary["applied_edits"][0]["action"] == "preserve"
+    assert summary["applied_updates"][0]["action"] == "preserve"
 
 
 def test_case_evolution_can_refresh_issue_abstraction(tmpdir) -> None:

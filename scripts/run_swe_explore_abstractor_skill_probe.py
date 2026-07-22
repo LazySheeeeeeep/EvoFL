@@ -131,7 +131,6 @@ def main(argv: list[str] | None = None) -> int:
                 "value": skill.get("value"),
                 "title": skill.get("title"),
                 "trigger": skill.get("trigger"),
-                "retrieval_text": skill.get("retrieval_text"),
                 "knowledge": skill.get("knowledge"),
                 "score": (
                     skill.get("score")

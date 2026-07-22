@@ -43,7 +43,6 @@ def skill_text(skill: DimensionSkill) -> str:
         skill.skill_id,
         skill.skill_type,
         skill.value,
-        skill.retrieval_text,
         skill.title,
         skill.trigger,
         skill.knowledge,
@@ -66,13 +65,9 @@ def score_skill(query_text: str, skill: DimensionSkill) -> tuple[float, dict[str
         score += 3.0
         bonuses.append("value")
     trigger_tokens = set(tokenize(skill.trigger))
-    retrieval_tokens = set(tokenize(skill.retrieval_text))
     if trigger_tokens.intersection(query_tokens):
         score += 1.0
         bonuses.append("trigger")
-    if retrieval_tokens.intersection(query_tokens):
-        score += 1.0
-        bonuses.append("retrieval_text")
     return score, {"overlap_tokens": overlap_tokens, "bonuses": bonuses}
 
 
