@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import io
 import json
 import os
 import random
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -30,6 +32,22 @@ DEFAULT_OUTPUT_DIR = "runs/swe_bench_15_compare_gpt5mini_20260622"
 SKILL_TYPES = ("project_skill", "strategy_skill")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 DIFF_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$")
+
+
+def _windows_host_path(path: Path) -> str:
+    """Translate a WSL-mounted path for legacy Docker Desktop call sites.
+
+    Current materialization streams ``docker cp`` into the active filesystem,
+    so the helper is not used by the normal WSL path.  Keeping this narrow
+    conversion preserves compatibility for callers that still need a Windows
+    host path when Docker Desktop is invoked directly.
+    """
+
+    parts = path.parts
+    if len(parts) >= 3 and parts[1].lower() == "mnt" and len(parts[2]) == 1:
+        suffix = "\\".join(parts[3:])
+        return f"{parts[2].upper()}:\\{suffix}" if suffix else f"{parts[2].upper()}:\\"
+    return str(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -275,9 +293,43 @@ def materialize_repo_from_image(image: str, repo_dir: Path) -> None:
     run(["docker", "rm", "-f", container], check=False)
     run(["docker", "create", "--name", container, image, "bash", "-lc", "sleep 1"], timeout=180)
     try:
-        run(["docker", "cp", f"{container}:/testbed", str(repo_dir)], timeout=600)
+        materialize_container_testbed(container, repo_dir)
     finally:
         run(["docker", "rm", "-f", container], check=False)
+
+
+def materialize_container_testbed(container: str, repo_dir: Path) -> None:
+    """Extract Docker's testbed tar stream in the active filesystem.
+
+    This avoids Docker Desktop interpreting a WSL destination as a Windows
+    path, which otherwise rejects valid repository symlinks during ``cp``.
+    """
+    cp = subprocess.run(
+        ["docker", "cp", f"{container}:/testbed", "-"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if cp.returncode != 0:
+        raise RuntimeError(
+            f"docker cp {container}:/testbed - failed: "
+            f"{cp.stderr.decode('utf-8', errors='replace').strip()}"
+        )
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(cp.stdout), mode="r:") as archive:
+        root = repo_dir.parent.resolve()
+        for member in archive.getmembers():
+            destination = (repo_dir.parent / member.name).resolve()
+            if destination != root and root not in destination.parents:
+                raise RuntimeError(f"Unsafe archive member from Docker: {member.name}")
+        archive.extractall(repo_dir.parent)
+    extracted = repo_dir.parent / "testbed"
+    if not extracted.is_dir():
+        raise RuntimeError("Docker archive did not contain /testbed")
+    if extracted != repo_dir:
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir)
+        extracted.rename(repo_dir)
 
 
 def materialize_repo_from_git(case: dict[str, Any], repo_dir: Path) -> None:

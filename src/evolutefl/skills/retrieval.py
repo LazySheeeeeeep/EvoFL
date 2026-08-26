@@ -9,6 +9,7 @@ from .schema import SKILL_TYPES, DimensionSkill
 
 DEFAULT_SKILL_TYPE_QUOTA = {
     "project_skill": 1,
+    "issue_skill": 1,
     "strategy_skill": 1,
 }
 
@@ -45,7 +46,7 @@ def skill_text(skill: DimensionSkill) -> str:
         skill.value,
         skill.title,
         skill.trigger,
-        skill.knowledge,
+        " ".join(skill.knowledge_texts),
     ]
     return " ".join(parts)
 
@@ -114,6 +115,15 @@ def select_skills(
         "candidate_skill_ids": [skill.skill_id for _, skill in candidates],
         "selected_skill_ids": [skill.skill_id for skill in selected],
         "scores": {skill.skill_id: score for score, skill in candidates},
+        "top_scores": [
+            {
+                "skill_id": skill.skill_id,
+                "score": score,
+                "skill_type": skill.skill_type,
+                "value": skill.value,
+            }
+            for score, skill in sorted(scored, key=lambda pair: (-pair[0], pair[1].skill_id))[:10]
+        ],
         "match_reasons": {skill.skill_id: match_reasons.get(skill.skill_id, {}) for _, skill in candidates},
         "filtered_below_threshold": filtered,
         "notes": [f"min_score={min_score}, project_skill_min_score={project_skill_min_score}"],

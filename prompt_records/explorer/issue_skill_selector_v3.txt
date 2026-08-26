@@ -1,0 +1,4 @@
+Select at most one Issue Skill from the supplied compact catalog.
+
+The input contains the issue report, repository orientation, an optional compact Project Skill, the Explorer request, and candidates with title and trigger. Select a card when its trigger jointly matches the observed symptom and the observed responsibility path or boundary. The title identifies the reusable issue family; the trigger is the applicability test. Use the trigger, not card knowledge, for selection. Return exactly one JSON object:
+{"selected_skill_id":"id or null","reason":"short evidence-based reason"}

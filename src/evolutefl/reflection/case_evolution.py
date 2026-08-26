@@ -1,19 +1,46 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from evolutefl.config import resolve_path
-from evolutefl.evaluation import hit_at_k
-from evolutefl.issue_abstraction import abstract_issue, fallback_issue_abstraction
+from evolutefl.evaluation import evaluate_ranked_functions
 from evolutefl.json_utils import read_json, write_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.skills import make_skill_bank
 
-from .insight import build_insight
-from .reflector import run_reflector
+from .reflector import finalize_skill_cards, generate_evolution_queries, run_reflector
 from .trajectory_compactor import build_compacted_trajectory
+
+
+REQUIRED_STAGE_EVENTS = {
+    "project_skill_request",
+    "project_skill_loaded",
+    "strategy_skill_request",
+    "strategy_skill_loaded",
+}
+
+_GENERIC_EVIDENCE_TERMS = {
+    "A",
+    "An",
+    "And",
+    "As",
+    "Compare",
+    "Consumer",
+    "Consumers",
+    "Data",
+    "Expected",
+    "For",
+    "If",
+    "Inspect",
+    "Rank",
+    "The",
+    "This",
+    "Use",
+    "When",
+}
 
 
 def run_case_evolution(
@@ -28,11 +55,18 @@ def run_case_evolution(
     ground_truth_functions: list[str] | None = None,
     ground_truth_locations: list[dict[str, Any]] | None = None,
     output_dir: str | Path | None = None,
-    reflect_success: bool = True,
+    reflect_success: bool = False,
     reflect_failure: bool = True,
-    legacy_insight: bool = False,
-    refresh_issue_abstraction: bool = False,
 ) -> dict[str, Any]:
+    if str((config.get("explorer") or {}).get("workflow_version") or "v2").lower() == "v3":
+        from .v3_evolution import run_v3_case_evolution
+
+        return run_v3_case_evolution(
+            case_run_dir=case_run_dir, repo=repo, issue=issue, config=config, llm_client=llm_client,
+            force=force, ground_truth_patch=ground_truth_patch, ground_truth_functions=ground_truth_functions,
+            ground_truth_locations=ground_truth_locations, output_dir=output_dir,
+            reflect_success=reflect_success, reflect_failure=reflect_failure,
+        )
     case_dir = Path(case_run_dir)
     out_dir = Path(output_dir) if output_dir else case_dir / "case_evolution"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -43,9 +77,9 @@ def run_case_evolution(
 
     result = read_json(result_path)
     trajectory = _read_trajectory(trajectory_path)
-    ranked_functions = result.get("ranked_functions", [])
+    ranked = result.get("ranked_functions", []) or []
     ground_truth_functions = ground_truth_functions or []
-    outcome = _label_outcome(result, ranked_functions, ground_truth_functions, force)
+    outcome = _label_outcome(result, ranked, ground_truth_functions, force)
     eligible, reason = _eligibility(
         result,
         outcome,
@@ -54,6 +88,10 @@ def run_case_evolution(
         reflect_success=reflect_success,
         reflect_failure=reflect_failure,
     )
+    stage_state = _stage_state(trajectory)
+    if eligible and not stage_state["compatible"]:
+        eligible = False
+        reason = "incompatible trajectory: missing staged skill request/load events"
 
     summary: dict[str, Any] = {
         "eligible": eligible,
@@ -61,7 +99,7 @@ def run_case_evolution(
         "case_run_dir": str(case_dir),
         "repo": repo,
         "outcome": outcome,
-        "legacy_insight": legacy_insight,
+        "stage_state": stage_state,
         "applied_updates": [],
         "updated_skill_ids": [],
     }
@@ -69,99 +107,98 @@ def run_case_evolution(
         write_json(out_dir / "case_evolution_summary.json", summary)
         return summary
 
-    reflection_cfg = config.get("reflection", {})
-    project_type_dedup_top_k = int(reflection_cfg.get("project_type_dedup_top_k", 5))
-    strategy_dedup_top_k = int(reflection_cfg.get("strategy_dedup_top_k", 5))
-    reflector_prompt = resolve_path(reflection_cfg.get("reflector_prompt_path", "prompt_records/reflection/reflector_skill_v0.txt")).read_text(encoding="utf-8")
+    reflection_cfg = config.get("reflection", {}) or {}
     client = llm_client or OpenAICompatibleClient.from_config(config.get("llm", {}))
     bank = make_skill_bank(config)
-    issue_abstraction = _load_issue_abstraction(
-        case_dir,
-        repo,
-        issue,
-        config,
-        llm_client=client,
-        output_dir=out_dir,
-        refresh=refresh_issue_abstraction,
-    )
-    skill_search = bank.search_for_explorer(repo, issue, issue_abstraction=issue_abstraction)
     trajectory_evidence = _build_trajectory_evidence(
         case_dir=case_dir,
         repo=repo,
         issue=issue,
-        issue_abstraction=issue_abstraction,
         result=result,
         trajectory=trajectory,
         outcome=outcome,
         ground_truth_functions=ground_truth_functions,
         ground_truth_locations=ground_truth_locations or [],
         ground_truth_patch=ground_truth_patch,
-        skill_search=skill_search,
+        stage_state=stage_state,
     )
     write_json(out_dir / "trajectory_evidence.json", trajectory_evidence)
 
-    insight: dict[str, Any] | None = None
-    if legacy_insight:
-        insight_input = {
-            "instance_id": result.get("instance_id") or case_dir.name,
-            "repo": repo,
-            "problem_statement": issue,
-            "trajectory": trajectory,
-            "top_5_results": ranked_functions[:5],
-            "ranked_functions": ranked_functions,
-            "ground_truth_functions": ground_truth_functions,
-            "ground_truth_locations": ground_truth_locations or [],
-            "ground_truth_patch": ground_truth_patch,
-            "final_summary": result.get("final_summary", ""),
-            "outcome": outcome,
-        }
-        write_json(out_dir / "insight_input.json", insight_input)
-        insight_prompt = resolve_path(reflection_cfg.get("insight_prompt_path", "prompt_records/reflection/reflection_insight_v1.txt")).read_text(encoding="utf-8")
-        insight = build_insight(
-            case_input=insight_input,
-            llm_client=client,
-            prompt=insight_prompt,
-            output_path=out_dir / "insight_debug.json",
+    query_prompt = resolve_path(
+        reflection_cfg.get(
+            "evolution_query_prompt_path",
+            "prompt_records/reflection/evolution_query_v0.txt",
         )
-        write_json(out_dir / "insight.json", insight)
-        skill_search_context = bank.search_for_reflector(
-            repo,
-            issue,
-            insight,
-            issue_abstraction=issue_abstraction,
-            explorer_search=skill_search,
-            project_candidate_limit=project_type_dedup_top_k,
-            strategy_candidate_limit=strategy_dedup_top_k,
-        )
-    else:
-        skill_search_context = bank.search_for_reflector(
-            repo,
-            issue,
-            issue_abstraction=issue_abstraction,
-            explorer_search=skill_search,
-            project_candidate_limit=project_type_dedup_top_k,
-            strategy_candidate_limit=strategy_dedup_top_k,
-        )
-    write_json(out_dir / "skill_search_context.json", skill_search_context)
+    ).read_text(encoding="utf-8")
+    strategy_catalog = bank.strategy_catalog()
+    evolution_queries = generate_evolution_queries(
+        trajectory_evidence=trajectory_evidence,
+        strategy_catalog=strategy_catalog,
+        llm_client=client,
+        prompt=query_prompt,
+        attempts=int(reflection_cfg.get("query_attempts", 2)),
+        output_path=out_dir / "evolution_queries_debug.json",
+    )
+    write_json(out_dir / "evolution_queries.json", evolution_queries)
 
+    skill_search_context = bank.search_for_evolution(
+        project_skill_query=evolution_queries["project_skill_query"],
+        selected_strategy_skill_id=evolution_queries["selected_strategy_skill_id"],
+        strategy_diagnostic_context=evolution_queries["strategy_diagnostic_context"],
+        limit_per_type=int(reflection_cfg.get("reflector_candidate_top_k", 5)),
+    )
+    _add_runtime_loaded_candidates(skill_search_context, bank, stage_state)
+    write_json(out_dir / "reflector_skill_search_context.json", skill_search_context)
+
+    reflector_prompt = resolve_path(
+        reflection_cfg.get(
+            "reflector_prompt_path",
+            "prompt_records/reflection/reflector_skill_v0.txt",
+        )
+    ).read_text(encoding="utf-8")
     reflector_output = run_reflector(
-        insight=insight,
-        trajectory_evidence=None if legacy_insight else trajectory_evidence,
-        issue_abstraction=issue_abstraction,
+        trajectory_evidence=trajectory_evidence,
+        evolution_queries=evolution_queries,
         skill_search_context=skill_search_context,
         llm_client=client,
         prompt=reflector_prompt,
+        attempts=int(reflection_cfg.get("reflector_attempts", 2)),
         output_path=out_dir / "reflector_debug.json",
     )
+    card_finalizer_prompt = resolve_path(
+        reflection_cfg.get(
+            "skill_card_finalizer_prompt_path",
+            "prompt_records/reflection/skill_card_finalizer_v0.txt",
+        )
+    ).read_text(encoding="utf-8")
+    semantic_center_prompt = resolve_path(
+        reflection_cfg.get(
+            "skill_semantic_center_prompt_path",
+            "prompt_records/reflection/skill_semantic_center_v0.txt",
+        )
+    ).read_text(encoding="utf-8")
+    reflector_output = finalize_skill_cards(
+        reflector_output=reflector_output,
+        llm_client=client,
+        prompt=card_finalizer_prompt,
+        semantic_center_prompt=semantic_center_prompt,
+        semantic_center_attempts=int(reflection_cfg.get("skill_semantic_center_attempts", 3)),
+        source_terms=_finalizer_source_terms(trajectory_evidence),
+        # Keep the compact-card contract strict, but allow one additional
+        # schema-feedback turn for small correctable formatting violations.
+        attempts=int(reflection_cfg.get("skill_card_finalizer_attempts", 3)),
+        output_path=out_dir / "skill_card_finalization_debug.json",
+    )
+    if outcome.get("label") == "success" and reflect_success:
+        reflector_output = _retain_project_updates_from_success(reflector_output)
     write_json(out_dir / "reflector_output.json", reflector_output)
 
     applied_updates: list[dict[str, Any]] = []
     failed_updates: list[dict[str, Any]] = []
-    for update in reflector_output.get("materialized_updates", []):
+    for update in reflector_output.get("materialized_updates", []) or []:
         try:
-            applied = bank.apply_update(update)
-            applied_updates.append(applied)
-        except Exception as exc:  # noqa: BLE001 - isolate an invalid atomic update.
+            applied_updates.append(bank.apply_update(update))
+        except Exception as exc:  # noqa: BLE001 - isolate atomic skill update failures.
             failed_updates.append(
                 {
                     "update_id": update.get("update_id"),
@@ -176,16 +213,20 @@ def run_case_evolution(
 
     summary.update(
         {
-            "insight": insight,
-            "issue_abstraction": issue_abstraction,
-            "trajectory_evidence": trajectory_evidence,
-            "reflector_output": reflector_output,
+            "trajectory_evidence_path": str(out_dir / "trajectory_evidence.json"),
+            "evolution_queries": evolution_queries,
+            "evolution_queries_path": str(out_dir / "evolution_queries.json"),
+            "reflector_skill_search_context_path": str(out_dir / "reflector_skill_search_context.json"),
+            "reflector_output_path": str(out_dir / "reflector_output.json"),
             "skill_updates": reflector_output.get("skill_updates"),
             "applied_updates": applied_updates,
             "failed_updates": failed_updates,
-            "outcome_type": outcome.get("label"),
-            "updated_skill_ids": [item.get("updated_skill_id") for item in applied_updates if item.get("updated_skill_id")],
-            "updated_skill_types": _updated_skill_types_from_updates(reflector_output.get("materialized_updates", [])),
+            "updated_skill_ids": [
+                item.get("updated_skill_id") for item in applied_updates if item.get("updated_skill_id")
+            ],
+            "updated_skill_types": _updated_skill_types(
+                reflector_output.get("materialized_updates", []) or []
+            ),
             "no_update_reason": reflector_output.get("no_update_reason"),
         }
     )
@@ -193,66 +234,144 @@ def run_case_evolution(
     return summary
 
 
+def _finalizer_source_terms(trajectory_evidence: dict[str, Any]) -> list[str]:
+    """Extract concrete symbols from the case evidence for portable-card checks."""
+
+    ground_truth = trajectory_evidence.get("ground_truth") or {}
+    prediction = trajectory_evidence.get("prediction") or {}
+    text = "\n".join(
+        [
+            str(trajectory_evidence.get("problem_statement") or ""),
+            str(ground_truth.get("patch_context") or ""),
+            *[str(item) for item in prediction.get("ranked_functions") or []],
+            *[str(item) for item in ground_truth.get("functions") or []],
+        ]
+    )
+    terms = set(re.findall(r"\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b", text))
+    # Class names in function identities are source vocabulary even when the
+    # class has a single capitalized word (for example, ``Delta``). Limit this
+    # extraction to identifier-shaped contexts rather than all prose words.
+    terms.update(re.findall(r"::([A-Z][A-Za-z0-9_]*)\.", text))
+    terms.update(re.findall(r"\b([A-Z][A-Za-z0-9_]*)\.[a-z_][A-Za-z0-9_]*\b", text))
+    return sorted(
+        (term for term in terms if len(term) > 2 and term not in _GENERIC_EVIDENCE_TERMS),
+        key=lambda item: (-len(item), item),
+    )[:48]
+
+
+def _retain_project_updates_from_success(reflector_output: dict[str, Any]) -> dict[str, Any]:
+    """Keep successful trajectories as system-knowledge evidence, not ranking lessons.
+
+    A completed Top-5 hit can establish a stable Project architecture, while a
+    Strategy card requires a corrective contrast from a localization miss.
+    ``reflect_success`` is opt-in; this guard makes its scope explicit even if
+    the Reflector returns both card types.
+    """
+
+    output = dict(reflector_output)
+    output["materialized_updates"] = [
+        update
+        for update in output.get("materialized_updates", []) or []
+        if update.get("skill_type") == "project_skill"
+    ]
+    updates = dict(output.get("skill_updates") or {})
+    updates["strategy_skill"] = {
+        "decision": "no_update",
+        "target_skill_id": None,
+        "rationale": "Successful localization supplies no corrective Strategy lesson.",
+        "skill": None,
+        "no_update_reason": "Strategy Skills are learned only from localization misses.",
+    }
+    output["skill_updates"] = updates
+    output["success_project_only"] = True
+    return output
+
+
 def _read_trajectory(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            if line.strip():
-                records.append(json.loads(line))
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
     return records
 
 
-def _load_issue_abstraction(
+def _stage_state(trajectory: list[dict[str, Any]]) -> dict[str, Any]:
+    events = [str(event.get("event") or "") for event in trajectory]
+    missing = sorted(REQUIRED_STAGE_EVENTS - set(events))
+    return {
+        "compatible": not missing,
+        "missing_events": missing,
+        "project_skill": _one_stage_state(trajectory, "project_skill"),
+        "strategy_skill": _one_stage_state(trajectory, "strategy_skill"),
+    }
+
+
+def _one_stage_state(trajectory: list[dict[str, Any]], skill_type: str) -> dict[str, Any]:
+    request = next((event for event in trajectory if event.get("event") == f"{skill_type}_request"), None)
+    loaded = next((event for event in trajectory if event.get("event") == f"{skill_type}_loaded"), None)
+    return {
+        "attempted": request is not None and loaded is not None,
+        "request": request,
+        "loaded_skill_id": (loaded or {}).get("loaded_skill_id"),
+        "matched": bool((loaded or {}).get("loaded_skill_id")),
+        "search_trace": (loaded or {}).get("search_trace", {}),
+    }
+
+
+def _build_trajectory_evidence(
+    *,
     case_dir: Path,
     repo: str,
     issue: str,
-    config: dict[str, Any],
-    *,
-    llm_client: Any | None = None,
-    output_dir: Path | None = None,
-    refresh: bool = False,
-) -> dict[str, Any] | None:
-    abstraction_cfg = config.get("issue_abstraction", {}) or {}
-    if abstraction_cfg.get("enabled", True) is False:
-        return None
-    if refresh:
-        if llm_client is None:
-            raise ValueError("Refreshing issue abstraction requires an LLM client.")
-        prompt_path = resolve_path(
-            abstraction_cfg.get("prompt_path", "prompt_records/explorer/issue_abstraction_v0.txt")
-        )
-        abstraction = abstract_issue(
-            repo=repo,
-            issue=issue,
-            llm_client=llm_client,
-            prompt=prompt_path.read_text(encoding="utf-8"),
-            output_path=(output_dir / "issue_abstraction_debug.json") if output_dir else None,
-        )
-        if output_dir:
-            write_json(output_dir / "issue_abstraction.json", abstraction)
-        return abstraction
-    abstraction_path = case_dir / "issue_abstraction.json"
-    if abstraction_path.exists():
-        try:
-            payload = read_json(abstraction_path)
-            if isinstance(payload, dict):
-                return payload
-        except Exception:  # noqa: BLE001 - old/corrupt run artifacts should not block evolution.
-            pass
-    return fallback_issue_abstraction(repo, issue)
+    result: dict[str, Any],
+    trajectory: list[dict[str, Any]],
+    outcome: dict[str, Any],
+    ground_truth_functions: list[str],
+    ground_truth_locations: list[dict[str, Any]],
+    ground_truth_patch: str,
+    stage_state: dict[str, Any],
+) -> dict[str, Any]:
+    evidence = {
+        "case": {
+            "instance_id": result.get("instance_id") or case_dir.name,
+            "repo": repo,
+            "case_run_dir": str(case_dir),
+        },
+        "problem_statement": issue,
+        "outcome": outcome,
+        "prediction": {
+            "ranked_functions": result.get("ranked_functions", []),
+            "top_5_results": (result.get("ranked_functions", []) or [])[:5],
+            "final_summary": result.get("final_summary", ""),
+        },
+        "ground_truth": {
+            "functions": ground_truth_functions,
+            "locations": ground_truth_locations,
+            "patch_context": ground_truth_patch[:12000],
+        },
+        "stage_state": stage_state,
+    }
+    evidence.update(build_compacted_trajectory(trajectory))
+    return evidence
 
 
 def _label_outcome(
-    result: dict[str, Any],
-    ranked_functions: list[str],
-    ground_truth_functions: list[str],
-    force: bool,
+    result: dict[str, Any], ranked: list[str], ground_truth: list[str], force: bool
 ) -> dict[str, Any]:
     status = result.get("status")
-    if status == "completed" and ground_truth_functions:
-        hit = hit_at_k(ranked_functions, ground_truth_functions, k=5)
+    if status == "completed" and ground_truth:
+        # Use the same Python-module normalization as batch metrics. Explorer
+        # models often emit dotted module paths, while patch ground truth uses
+        # repository paths such as ``package/module.py::symbol``.
+        hit = bool(evaluate_ranked_functions(ranked, ground_truth).get("top5"))
         return {
             "label": "success" if hit else "failure",
             "top5_hit": hit,
@@ -270,7 +389,7 @@ def _label_outcome(
 def _eligibility(
     result: dict[str, Any],
     outcome: dict[str, Any],
-    ground_truth_functions: list[str],
+    ground_truth: list[str],
     force: bool,
     *,
     reflect_success: bool,
@@ -280,74 +399,62 @@ def _eligibility(
         return True, "force enabled"
     if result.get("status") != "completed":
         return False, "case is not completed"
-    if not ground_truth_functions:
+    if not ground_truth:
         return False, "ground truth functions are missing"
     if outcome.get("label") == "success" and not reflect_success:
         return False, "completed top-5 hit but reflect_success is disabled"
     if outcome.get("label") == "failure" and not reflect_failure:
         return False, "completed top-5 miss but reflect_failure is disabled"
-    return True, outcome.get("reason", "completed case")
+    return True, str(outcome.get("reason") or "completed case")
 
 
-def _build_trajectory_evidence(
-    *,
-    case_dir: Path,
-    repo: str,
-    issue: str,
-    issue_abstraction: dict[str, Any] | None,
-    result: dict[str, Any],
-    trajectory: list[dict[str, Any]],
-    outcome: dict[str, Any],
-    ground_truth_functions: list[str],
-    ground_truth_locations: list[dict[str, Any]],
-    ground_truth_patch: str,
-    skill_search: dict[str, Any],
-) -> dict[str, Any]:
-    compacted = build_compacted_trajectory(trajectory)
-    evidence = {
-        "case": {
-            "instance_id": result.get("instance_id") or case_dir.name,
-            "repo": repo,
-            "case_run_dir": str(case_dir),
-        },
-        "problem_statement": issue,
-        "issue_abstraction": issue_abstraction,
-        "outcome": outcome,
-        "prediction": {
-            "ranked_functions": result.get("ranked_functions", []),
-            "top_5_results": result.get("ranked_functions", [])[:5],
-            "final_summary": result.get("final_summary", ""),
-        },
-        "ground_truth": {
-            "functions": ground_truth_functions,
-            "locations": ground_truth_locations,
-            "patch_context": ground_truth_patch[:12000],
-        },
-        "retrieved_skill_context": {
-            "matched_skills": skill_search.get("matched_skills", []),
-            "skill_type_slots": skill_search.get("skill_type_slots", {}),
-            "skill_search_trace": skill_search.get("skill_search_trace", {}),
-        },
-        "evolution_policy_hint": _policy_hint(outcome, bool(skill_search.get("matched_skills"))),
+def _updated_skill_types(updates: list[dict[str, Any]]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(update.get("skill_type"))
+            for update in updates
+            if isinstance(update, dict) and update.get("skill_type")
+        )
+    )
+
+
+def _add_runtime_loaded_candidates(
+    skill_search_context: dict[str, Any], bank: Any, stage_state: dict[str, Any]
+) -> None:
+    """Expose runtime context without weakening Strategy semantic matching.
+
+    A loaded Project Skill remains a useful rewrite candidate because it was
+    selected from concrete repository structure. Strategy cards instead encode
+    a narrowly conditioned decision; only the independently selected catalog
+    card may become a Strategy update target. Other runtime-loaded Strategy
+    cards remain visible as trajectory evidence but cannot be preserved merely
+    because Explorer happened to inspect them.
+    """
+
+    runtime_loaded: list[dict[str, Any]] = []
+    known_ids = {
+        str(skill.get("skill_id") or "")
+        for skill in (skill_search_context.get("candidate_target_skills") or [])
+        if isinstance(skill, dict)
     }
-    evidence.update(compacted)
-    return evidence
-
-
-def _policy_hint(outcome: dict[str, Any], has_relevant_skill: bool) -> str:
-    if outcome.get("label") == "success" and has_relevant_skill:
-        return "Success with a relevant retrieved skill: preserve it unless the case supports a coherent full-card rewrite."
-    if outcome.get("label") == "success":
-        return "Success without relevant retrieved skill: create only if the trajectory reveals transferable localization knowledge."
-    if has_relevant_skill:
-        return "Failure with a relevant retrieved skill: rewrite it only when semantic identity is unchanged; otherwise create or no_update."
-    return "Failure without relevant retrieved skill: create only if the lesson is transferable; otherwise no_update."
-
-
-def _updated_skill_types_from_updates(updates: list[dict[str, Any]]) -> list[str]:
-    skill_types: list[str] = []
-    for update in updates:
-        skill_type = update.get("skill_type") if isinstance(update, dict) else None
-        if skill_type and skill_type not in skill_types:
-            skill_types.append(str(skill_type))
-    return skill_types
+    by_type = skill_search_context.setdefault("candidates_by_skill_type", {})
+    for skill_type in ("project_skill", "strategy_skill"):
+        skill_id = str(
+            ((stage_state.get(skill_type) or {}).get("loaded_skill_id") or "")
+        ).strip()
+        if not skill_id:
+            continue
+        skill = bank.get_active_skill(skill_id, skill_type=skill_type)
+        if not skill:
+            continue
+        candidate = {**skill, "candidate_source": "runtime_loaded"}
+        runtime_loaded.append(candidate)
+        if skill_type == "strategy_skill":
+            selected_id = str(skill_search_context.get("selected_strategy_skill_id") or "").strip()
+            if skill_id != selected_id:
+                continue
+        if skill_id not in known_ids:
+            by_type.setdefault(skill_type, []).append(candidate)
+            skill_search_context.setdefault("candidate_target_skills", []).append(candidate)
+            known_ids.add(skill_id)
+    skill_search_context["runtime_loaded_skills"] = runtime_loaded

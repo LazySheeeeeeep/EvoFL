@@ -44,22 +44,47 @@ def _select_head_tail(
     tail_events: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     total = len(trajectory)
-    if total <= head_events + tail_events:
-        selected = list(trajectory)
-        omitted = 0
-    else:
-        selected = [*trajectory[:head_events], {"event": "middle_truncated", "omitted_event_count": total - head_events - tail_events}, *trajectory[-tail_events:]]
-        omitted = total - head_events - tail_events
+    stage_events = {
+        "project_skill_request",
+        "project_skill_loaded",
+        "issue_revealed",
+        "issue_skill_request",
+        "issue_skill_loaded",
+        "strategy_skill_request",
+        "strategy_skill_loaded",
+    }
+    selected_indices = set(range(min(head_events, total)))
+    selected_indices.update(range(max(0, total - tail_events), total))
+    stage_indices: list[int] = []
+    for index, event in enumerate(trajectory):
+        if isinstance(event, dict) and event.get("event") in stage_events:
+            stage_indices.append(index)
+            # Preserve the local repository observation/control exchange around
+            # each stage transition without summarizing it with another model.
+            selected_indices.update(range(max(0, index - 2), min(total, index + 3)))
+
+    ordered_indices = sorted(selected_indices)
+    selected: list[dict[str, Any]] = []
+    previous = -1
+    for index in ordered_indices:
+        gap = index - previous - 1
+        if gap > 0 and previous >= 0:
+            selected.append({"event": "middle_truncated", "omitted_event_count": gap})
+        selected.append(trajectory[index])
+        previous = index
+    omitted = total - len(ordered_indices)
     return selected, {
-        "strategy": "field_aware_head_tail_v1",
+        "strategy": "stage_aware_field_clipping_v2",
         "raw_event_count": total,
         "selected_event_count": len(selected),
         "head_events": min(head_events, total),
         "tail_events": min(tail_events, max(0, total - min(head_events, total))),
         "omitted_middle_event_count": omitted,
+        "preserved_stage_event_indices": stage_indices,
         "field_limits": FIELD_LIMITS,
         "notes": [
-            "Head events preserve initial issue interpretation and skill context.",
+            "Head events preserve initial repository exploration.",
+            "Project, Issue, and Strategy requests, loads, and nearby observations are always retained.",
             "Tail events preserve final ranking, repair, forced finish, or failure behavior.",
             "Tool observations are clipped by field budget; the compactor does not infer new knowledge.",
         ],
@@ -84,13 +109,20 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
         entry["content_preview"] = _clip_observation(event.get("content", ""))
     elif kind == "finish":
         entry["details"] = _clip_mapping({key: value for key, value in event.items() if key != "event"}, FIELD_LIMITS["finish"])
-    elif kind == "skill_context":
-        entry["details"] = {
-            "issue_abstraction": _clip_mapping(event.get("issue_abstraction") or {}, FIELD_LIMITS["details"]),
-            "matched_skill_ids": [str(item) for item in event.get("matched_skill_ids", []) or []],
-            "assembled_context": _clip_mapping(event.get("assembled_context") or {}, FIELD_LIMITS["details"]),
-        }
-    elif kind in ("forced_finish", "response_repair", "decision_checkpoint", "finalization_mode"):
+    elif kind in (
+        "project_skill_request",
+        "project_skill_loaded",
+        "issue_revealed",
+        "issue_skill_request",
+        "issue_skill_loaded",
+        "strategy_skill_request",
+        "strategy_skill_loaded",
+    ):
+        entry["details"] = _clip_mapping(
+            {key: value for key, value in event.items() if key not in {"event", "step"}},
+            FIELD_LIMITS["details"],
+        )
+    elif kind in ("forced_finish", "response_repair", "stage_finalization"):
         entry["details"] = _clip_mapping({key: value for key, value in event.items() if key != "event"}, FIELD_LIMITS["details"])
     else:
         entry["details"] = _clip_mapping({key: value for key, value in event.items() if key != "event"}, FIELD_LIMITS["details"])

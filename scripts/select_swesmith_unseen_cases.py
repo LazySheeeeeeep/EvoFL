@@ -25,6 +25,9 @@ def main() -> int:
         instance_id = row.get("instance_id")
         if not instance_id or instance_id in seen:
             continue
+        problem_statement = str(row.get("problem_statement") or "").strip()
+        if not problem_statement:
+            continue
         image_name = row.get("image_name", "")
         if local_images and image_name not in local_images and f"{image_name}:latest" not in local_images:
             continue
@@ -32,7 +35,7 @@ def main() -> int:
             "instance_id": instance_id,
             "repo": row.get("repo", ""),
             "image_name": image_name,
-            "problem_statement": row.get("problem_statement", ""),
+            "problem_statement": problem_statement,
             "patch": row.get("patch", ""),
             "base_commit": row.get("repo", "").split(".")[-1] if row.get("repo") else "",
         }

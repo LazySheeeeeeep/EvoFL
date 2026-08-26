@@ -32,8 +32,32 @@ def make_skill_bank(config: dict[str, Any]) -> SkillBankV0:
         embedding_min_score=float(
             bank_cfg.get("embedding_min_score", embedding_cfg.get("min_score", DEFAULT_EMBEDDING_MIN_SCORE))
         ),
+        project_skill_embedding_min_score=_optional_float(
+            bank_cfg.get("project_skill_embedding_min_score")
+        ),
+        issue_skill_embedding_min_score=_optional_float(
+            bank_cfg.get("issue_skill_embedding_min_score")
+        ),
+        strategy_skill_embedding_min_score=_optional_float(
+            bank_cfg.get("strategy_skill_embedding_min_score")
+        ),
+        project_skill_candidate_min_score=float(
+            # Candidate recall is deliberately permissive. The Explorer's
+            # native Project selector is the applicability gate and may
+            # return none after inspecting component roles and boundaries.
+            bank_cfg.get("project_skill_candidate_min_score", 0.0)
+        ),
+        issue_skill_candidate_min_score=float(
+            # Embedding provides a compact Issue neighborhood. The selector and
+            # validator, rather than a global numeric cutoff, decide injection.
+            bank_cfg.get("issue_skill_candidate_min_score", 0.0)
+        ),
+        evolution_candidate_min_score=float(
+            bank_cfg.get("evolution_candidate_min_score", 0.25)
+        ),
         embedding_fallback_to_lexical=bool(bank_cfg.get("embedding_fallback_to_lexical", False)),
         embedding_batch_size=int(embedding_cfg.get("batch_size", bank_cfg.get("embedding_batch_size", 16))),
+        enabled_skill_types=bank_cfg.get("enabled_skill_types"),
     )
 
 
@@ -41,3 +65,7 @@ def _resolve_optional_path(path: Any) -> Path | None:
     if not path:
         return None
     return resolve_path(path)
+
+
+def _optional_float(value: Any) -> float | None:
+    return None if value is None else float(value)

@@ -30,16 +30,38 @@ class EmbeddingRetrievalConfig:
 
 
 def skill_embedding_text(skill: DimensionSkill) -> str:
-    """Return the canonical skill content used for embedding retrieval."""
+    """Return the complete, bounded Skill card used for semantic retrieval.
 
-    parts = [
-        f"skill_type: {skill.skill_type}",
-        f"scope: {skill.scope}",
-        f"value: {skill.value}",
-        f"title: {skill.title}",
-        f"trigger: {skill.trigger}",
-        f"knowledge: {skill.knowledge}",
-    ]
+    Runtime injection remains selective, but the embedding needs the card's
+    role-level knowledge to distinguish similarly named subsystem boundaries.
+    Issue cards are maintained as atomic propositions, so their numeric IDs
+    remain storage metadata and only proposition text enters this document.
+    """
+
+    if skill.skill_type == "project_skill":
+        parts = [
+            "skill_type: project_skill",
+            f"project_type: {skill.value}",
+            f"title: {skill.title}",
+            f"architecture_signature: {skill.trigger}",
+            "knowledge:\n- " + "\n- ".join(skill.knowledge_texts),
+        ]
+    elif skill.skill_type == "issue_skill":
+        parts = [
+            "skill_type: issue_skill",
+            f"issue_family: {skill.value}",
+            f"title: {skill.title}",
+            f"applicability_trigger: {skill.trigger}",
+            "knowledge:\n- " + "\n- ".join(skill.knowledge_texts),
+        ]
+    else:
+        parts = [
+            "skill_type: strategy_skill",
+            f"value: {skill.value}",
+            f"title: {skill.title}",
+            f"applicability_trigger: {skill.trigger}",
+            "knowledge:\n- " + "\n- ".join(skill.knowledge_texts),
+        ]
     return "\n".join(part for part in parts if part.strip())
 
 
@@ -103,7 +125,6 @@ class SkillEmbeddingStore:
                     "skill_id": skill.skill_id,
                     "version": skill.version,
                     "skill_type": skill.skill_type,
-                    "scope": skill.scope,
                     "value": skill.value,
                     "model_id": self.model_id,
                     "text_hash": text_hash,
@@ -156,7 +177,6 @@ def select_embedding_skills(
             "skill_id": skill.skill_id,
             "score": score,
             "skill_type": skill.skill_type,
-            "scope": skill.scope,
             "value": skill.value,
         }
         for score, skill in scored[:EMBEDDING_TRACE_LIMIT]

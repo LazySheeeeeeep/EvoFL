@@ -11,7 +11,7 @@ from evolutefl.explorer import run_explorer
 from evolutefl.json_utils import read_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.reflection import run_case_evolution
-from evolutefl.skills import assemble_skill_context, make_skill_bank, render_skill_context
+from evolutefl.skills import make_skill_bank
 from evolutefl.tools import ToolRegistry, register_builtin_tools
 
 
@@ -35,10 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     show = sub.add_parser("show-tools", help="Show fixed Explorer tools.")
     show.set_defaults(func=cmd_show_tools)
 
-    search = sub.add_parser("search-skills-preview", help="Preview skill retrieval and assembled localization context.")
+    search = sub.add_parser("search-skills-preview", help="Preview one staged skill retrieval query.")
     add_config_arg(search)
     add_embedding_override_args(search)
     search.add_argument("--repo", required=True)
+    search.add_argument("--skill-type", choices=["project_skill", "strategy_skill"], required=True)
     add_issue_args(search)
     search.set_defaults(func=cmd_search_skills_preview)
 
@@ -46,16 +47,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(rebuild)
     add_embedding_override_args(rebuild)
     rebuild.set_defaults(func=cmd_rebuild_skill_embeddings)
-
-    assemble = sub.add_parser("assemble-skills-preview", help="Preview project/strategy context for skill ids.")
-    add_config_arg(assemble)
-    assemble.add_argument("--skill-ids", required=True, help="Comma-separated skill ids.")
-    assemble.set_defaults(func=cmd_assemble_skills_preview)
-
-    compose = sub.add_parser("compose-skills-preview", help="Compatibility alias for assemble-skills-preview.")
-    add_config_arg(compose)
-    compose.add_argument("--skill-ids", required=True, help="Comma-separated skill ids.")
-    compose.set_defaults(func=cmd_assemble_skills_preview)
 
     run_agent = sub.add_parser("run-agent", help="Run Explorer on one issue.")
     add_config_arg(run_agent)
@@ -79,13 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     evolve.add_argument("--ground-truth-functions-file")
     evolve.add_argument("--ground-truth-locations-file")
     evolve.add_argument("--force", action="store_true")
-    evolve.add_argument("--legacy-insight", action="store_true", help="Use the legacy Insight -> Reflector path.")
-    evolve.add_argument(
-        "--refresh-issue-abstraction",
-        action="store_true",
-        help="Regenerate the retrieval abstraction with the current Abstractor prompt before reflection.",
-    )
-    evolve.add_argument("--reflect-success", dest="reflect_success", action="store_true", default=True)
+    evolve.add_argument("--reflect-success", dest="reflect_success", action="store_true", default=False)
     evolve.add_argument("--no-reflect-success", dest="reflect_success", action="store_false")
     evolve.add_argument("--reflect-failure", dest="reflect_failure", action="store_true", default=True)
     evolve.add_argument("--no-reflect-failure", dest="reflect_failure", action="store_false")
@@ -128,18 +113,8 @@ def cmd_search_skills_preview(args: argparse.Namespace) -> Any:
     apply_embedding_overrides(config, args)
     issue = read_issue(args)
     bank = make_skill_bank(config)
-    search = bank.search_for_explorer(args.repo, issue)
-    assembled = assemble_skill_context(
-        search["matched_skills"],
-        config.get("assembler", {}).get("max_per_skill_type")
-        or config.get("assembler", {}).get("max_per_dimension"),
-        int(config.get("assembler", {}).get("max_knowledge_chars", 900)),
-    )
-    return {
-        **search,
-        "assembled_context": assembled,
-        "rendered_context": render_skill_context(assembled) if search["matched_skills"] else "",
-    }
+    query = f"{args.repo}\n{issue}"
+    return bank.search_for_stage(args.skill_type, query, limit=1)
 
 
 def cmd_rebuild_skill_embeddings(args: argparse.Namespace) -> Any:
@@ -147,24 +122,6 @@ def cmd_rebuild_skill_embeddings(args: argparse.Namespace) -> Any:
     apply_embedding_overrides(config, args)
     bank = make_skill_bank(config)
     return bank.rebuild_embeddings()
-
-
-def cmd_assemble_skills_preview(args: argparse.Namespace) -> Any:
-    config = load_config(args.config)
-    wanted = {skill_id.strip() for skill_id in args.skill_ids.split(",") if skill_id.strip()}
-    bank = make_skill_bank(config)
-    skills = [skill.compact_dict() for skill in bank.active_skills() if skill.skill_id in wanted]
-    assembled = assemble_skill_context(
-        skills,
-        config.get("assembler", {}).get("max_per_skill_type")
-        or config.get("assembler", {}).get("max_per_dimension"),
-        int(config.get("assembler", {}).get("max_knowledge_chars", 900)),
-    )
-    return {
-        "matched_skills": skills,
-        "assembled_context": assembled,
-        "rendered_context": render_skill_context(assembled),
-    }
 
 
 def cmd_run_agent(args: argparse.Namespace) -> Any:
@@ -200,8 +157,6 @@ def cmd_run_case_evolution(args: argparse.Namespace) -> Any:
         output_dir=args.output_dir,
         reflect_success=args.reflect_success,
         reflect_failure=args.reflect_failure,
-        legacy_insight=args.legacy_insight,
-        refresh_issue_abstraction=args.refresh_issue_abstraction,
     )
 
 

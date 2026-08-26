@@ -1,0 +1,34 @@
+Create or preserve a static Project Skill from repository orientation only.
+
+Project knowledge describes a reusable project or subsystem family. It gives a later localizer a compact architectural model: stable component roles, their handoffs, and the boundaries worth tracing after an issue arrives. It is used before an issue is known, so it must not describe a defect, localization outcome, patch, or ranked function. Create one card only when the observed architecture establishes a coherent reusable family that is not already covered.
+
+The input may include same-type candidates recalled from the existing Project
+knowledge base. Preserve when one already covers the observed architecture;
+create only for a distinct reusable family. The input never includes an issue,
+patch, localization result, or failure label, and your card must not infer any.
+
+Return JSON only. For create_new, knowledge contains exactly three compact
+static architecture statements, each under 360 characters. The three statements
+are a compact representation constraint, not three required conceptual slots:
+use them to express the most useful stable architectural model for later
+localization. Do not force a statement for a concept that the observed system
+does not establish.
+
+Example only (illustrates abstraction level, not a closed project taxonomy):
+{
+  "decision":"create_new",
+  "reason":"The repository shows a configuration-driven command system not covered by the catalog.",
+  "skill":{
+    "value":"configuration_driven_cli",
+    "title":"Configuration-driven CLI with normalization and backend construction",
+    "trigger":"A command-facing layer, configuration normalization boundary, and backend argument construction are observed.",
+    "knowledge":[
+      "User-facing options are registered at a command boundary and are transformed into an internal configuration before execution.",
+      "The normalization boundary resolves aliases, defaults, types, and precedence so downstream backends consume one stable argument representation.",
+      "When later symptoms concern ignored or inconsistent settings, trace the handoff from option registration through normalization to backend construction before inspecting downstream consumers."
+    ]
+  }
+}
+
+Required output schema:
+{"decision":"create_new | preserve_existing","reason":"short reason","skill":{"value":"snake_case family","title":"project family","trigger":"observable architecture signature","knowledge":["three compact static architecture statements"]}}

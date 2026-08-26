@@ -13,14 +13,15 @@
         "api_key_env": "OPENAI_API_KEY",
         "model": "gpt-4o-mini"
       },
-      "deepseek": {
-        "base_url": "",
-        "base_url_env": "DEEPSEEK_BASE_URL",
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "model": "deepseek-v4-flash"
+    "deepseek": {
+      "base_url": "",
+      "base_url_env": "DEEPSEEK_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "model": "deepseek-v4-flash",
+      "supports_tool_choice": false
       },
       "key77": {
-        "base_url": "https://api.key77qiqi.cn/v1",
+        "base_url": "https://api.key77qiqi.com/v1",
         "api_key_env": "KEY77_API_KEY",
         "model": "gpt-4o-mini"
       },
@@ -32,33 +33,46 @@
     }
   },
   "explorer": {
+    "workflow_version": "v3",
     "max_steps": 30,
+    "orientation_tool_budget": 3,
+    "issue_skill_evidence_budget": 2,
     "response_retries": 2,
-    "checkpoint_interval": 8,
     "finalization_steps": 3,
-    "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt"
-  },
-  "issue_abstraction": {
-    "enabled": true,
-    "prompt_path": "prompt_records/explorer/issue_abstraction_v0.txt",
-    "attempts": 2
+    "system_prompt_path": "prompt_records/explorer/explorer_system_v0.txt",
+    "project_skill_selector_prompt_path": "prompt_records/explorer/project_skill_selector_v0.txt",
+    "issue_skill_selector_prompt_path": "prompt_records/explorer/issue_skill_selector_v3.txt",
+    "issue_skill_validator_prompt_path": "prompt_records/explorer/issue_skill_validator_v3.txt",
+    "project_skill_candidate_limit": 8,
+    "project_skill_selector_max_tokens": 2048
   },
   "reflection": {
-    "insight_prompt_path": "prompt_records/reflection/reflection_insight_v1.txt",
+    "project_builder_prompt_path": "prompt_records/reflection/project_knowledge_builder_v3.txt",
+    "project_builder_attempts": 2,
+    "evolution_query_prompt_path": "prompt_records/reflection/evolution_query_v3.txt",
     "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt",
-    "project_type_dedup_top_k": 5,
-    "strategy_dedup_top_k": 5
+    "skill_semantic_center_prompt_path": "prompt_records/reflection/skill_semantic_center_v0.txt",
+    "skill_card_finalizer_prompt_path": "prompt_records/reflection/skill_card_finalizer_v0.txt",
+    "skill_semantic_center_attempts": 3,
+    "query_attempts": 2,
+    "reflector_attempts": 2,
+    "skill_card_finalizer_attempts": 3,
+    "reflector_candidate_top_k": 5
   },
   "skill_bank": {
-    "path": "skill_pools/skill_bank_v0/skills.jsonl",
+    "path": "skill_pools/skill_bank_v3/skills.jsonl",
     "retrieval_mode": "lexical",
     "max_matched_skills": 2,
     "min_score": 4.0,
     "project_skill_min_score": 6.0,
+    "issue_skill_embedding_min_score": 0.48,
     "embedding_min_score": 0.48,
+    "project_skill_candidate_min_score": 0.0,
+    "issue_skill_candidate_min_score": 0.0,
     "embedding_fallback_to_lexical": false,
     "max_per_skill_type": {
       "project_skill": 1,
+      "issue_skill": 1,
       "strategy_skill": 1
     }
   },
@@ -70,15 +84,8 @@
     "model": "jina-embeddings-v3",
     "query_task": "retrieval.query",
     "document_task": "retrieval.passage",
-    "cache_path": "skill_pools/skill_bank_v0/embeddings/jina_v3/skill_embeddings.jsonl",
+    "cache_path": "skill_pools/skill_bank_v3/embeddings/jina_v3/skill_embeddings.jsonl",
     "batch_size": 16,
     "timeout": 120
-  },
-  "assembler": {
-    "max_knowledge_chars": 900,
-    "max_per_skill_type": {
-      "project_skill": 1,
-      "strategy_skill": 1
-    }
   }
 }

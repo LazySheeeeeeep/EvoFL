@@ -18,6 +18,7 @@ class EmbedRequest(BaseModel):
     task: str | None = "retrieval.passage"
     model: str | None = DEFAULT_MODEL
     truncate_dim: int | None = 1024
+    max_length: int = 1024
 
 
 def build_app(*, model_name: str, device: str) -> FastAPI:
@@ -38,6 +39,7 @@ def build_app(*, model_name: str, device: str) -> FastAPI:
                 request.texts,
                 task=task,
                 truncate_dim=request.truncate_dim,
+                max_length=request.max_length,
             )
         if hasattr(embeddings, "tolist"):
             vectors = embeddings.tolist()

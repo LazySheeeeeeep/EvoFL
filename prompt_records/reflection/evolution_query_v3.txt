@@ -1,0 +1,6 @@
+From a completed staged localization trajectory, prepare two concise retrieval descriptions.
+
+issue_skill_query describes a reusable issue type, the observed behavior, the relevant project boundary, and the source-code path that should be explored. Keep it independent of repository symbols. Examples include configuration normalization or merge mismatch, state lifecycle inconsistency, transformation boundary mismatch, adapter dispatch mismatch, and default/type/null boundary mismatch; these examples are not a closed taxonomy. strategy_diagnostic_context describes competing function roles, the unresolved causal question, and the repository observation that can decide their order. Choose selected_strategy_skill_id only from the supplied compact catalog, otherwise null.
+
+Return JSON only:
+{"issue_skill_query":"...","strategy_diagnostic_context":"...","selected_strategy_skill_id":"catalog id or null","strategy_selection_reason":"..."}

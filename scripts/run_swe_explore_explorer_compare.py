@@ -22,6 +22,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from evolutefl.config import llm_config, load_config  # noqa: E402
+from evolutefl.evaluation import evaluate_ranked_functions, functions_from_patch  # noqa: E402
 from evolutefl.explorer import run_explorer  # noqa: E402
 from evolutefl.llm.client import OpenAICompatibleClient  # noqa: E402
 from evolutefl.skills import make_skill_bank  # noqa: E402
@@ -46,6 +47,7 @@ DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
 SWE_EXPLORE_DATASET = "SWE-Explore-Bench/SWE-Explore-Bench"
 SWE_VERIFIED_DATASET = "princeton-nlp/SWE-bench_Verified"
 SKILL_TYPES = ("project_skill", "strategy_skill")
+ARM_NAMES = ("baseline_no_skill", "project_only", "strategy_only", "with_skill")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -61,19 +63,53 @@ def main(argv: list[str] | None = None) -> int:
     config.setdefault("explorer", {})
     config["explorer"]["max_steps"] = args.max_steps
     config["explorer"]["max_runtime_seconds"] = args.case_timeout_seconds
-    check_llm_config(config["llm"], args.provider)
+    config["llm"]["temperature"] = args.temperature
+    if args.llm_seed is not None:
+        config["llm"]["seed"] = args.llm_seed
+    if args.llm_max_attempts is not None:
+        config["llm"]["max_attempts"] = args.llm_max_attempts
+    if args.llm_timeout is not None:
+        config["llm"]["timeout"] = args.llm_timeout
+    config["_rerun_existing"] = args.rerun_existing
+    if not (args.report_only or args.prepare_only):
+        check_llm_config(config["llm"], args.provider)
 
-    selected = load_selected_cases(args.selected_cases_file) if args.selected_cases_file else select_cases(args)
-    write_json(out_dir / "selected_cases.json", selected)
+    existing_manifest = out_dir / "selected_cases.json"
+    if args.selected_cases_file:
+        selected = load_selected_cases(args.selected_cases_file)
+    elif args.report_only and existing_manifest.exists():
+        # A report must describe the cases that produced the existing arm
+        # artifacts. Re-sampling here corrupts the comparison denominator.
+        selected = load_selected_cases(str(existing_manifest))
+    else:
+        selected = select_cases(args)
+    selected = selected[: args.sample_size]
+    if not args.report_only:
+        write_json(existing_manifest, selected)
+    if args.report_only:
+        arm_summaries = {
+            arm_name: read_required_json(out_dir / arm_name / "summary.json")
+            for arm_name in ARM_NAMES
+            if (out_dir / arm_name / "summary.json").exists()
+        }
+        comparison = build_comparison(out_dir, selected, arm_summaries, base_repo_root=_report_base_repo_root(out_dir))
+        write_json(out_dir / "comparison_summary.json", comparison)
+        print(json.dumps(comparison, ensure_ascii=False, indent=2))
+        return 0
 
-    materialization = materialize_selected_cases(
-        selected,
-        out_dir,
-        force_recopy=args.force_recopy_repos,
-        materialization_mode=args.materialization_mode,
-        pull_images=not args.no_pull_images,
-        github_archive_mirror=args.github_archive_mirror or None,
-    )
+    if args.repo_cache_root:
+        base_repo_root = Path(args.repo_cache_root).resolve()
+        materialization = validate_repo_cache(selected, base_repo_root)
+    else:
+        base_repo_root = out_dir / "repos_base"
+        materialization = materialize_selected_cases(
+            selected,
+            out_dir,
+            force_recopy=args.force_recopy_repos,
+            materialization_mode=args.materialization_mode,
+            pull_images=not args.no_pull_images,
+            github_archive_mirror=args.github_archive_mirror or None,
+        )
     write_json(out_dir / "materialization_report.json", materialization)
     if materialization["failed"]:
         print(json.dumps({"status": "materialization_failed", **materialization}, ensure_ascii=False, indent=2))
@@ -83,22 +119,46 @@ def main(argv: list[str] | None = None) -> int:
     if args.rebuild_embeddings:
         rebuild = make_skill_bank(skill_config).rebuild_embeddings()
         write_json(out_dir / "embedding_rebuild.json", rebuild)
+    if args.prepare_only:
+        print(json.dumps({"status": "prepared", **materialization}, ensure_ascii=False, indent=2))
+        return 0
 
-    arms = [
+    all_arms = [
         ("baseline_no_skill", make_no_skill_config(config, out_dir)),
+        ("project_only", make_type_limited_skill_config(skill_config, "project_skill")),
+        ("strategy_only", make_type_limited_skill_config(skill_config, "strategy_skill")),
         ("with_skill", skill_config),
     ]
+    runtime_repo_root = (
+        Path(args.runtime_repo_root).expanduser().resolve()
+        if args.runtime_repo_root
+        else None
+    )
+    selected_arm_names = (
+        {"baseline_no_skill", "with_skill"}
+        if args.arm == "both"
+        else set(ARM_NAMES)
+        if args.arm == "all"
+        else {args.arm}
+    )
+    arms = [(name, arm_config) for name, arm_config in all_arms if name in selected_arm_names]
     arm_summaries: dict[str, dict[str, Any]] = {}
     for arm_name, arm_config in arms:
         arm_summaries[arm_name] = run_arm(
             arm_name=arm_name,
             selected=selected,
-            base_repo_root=out_dir / "repos_base",
+            base_repo_root=base_repo_root,
             out_dir=out_dir,
             config=arm_config,
+            repo_mode=args.repo_mode,
+            runtime_repo_root=runtime_repo_root,
         )
 
-    comparison = build_comparison(out_dir, selected, arm_summaries)
+    if args.arm not in {"both", "all"}:
+        print(json.dumps({"status": "arm_completed", "arm": args.arm, "summary": arm_summaries[args.arm]}, ensure_ascii=False, indent=2))
+        return 0
+
+    comparison = build_comparison(out_dir, selected, arm_summaries, base_repo_root=base_repo_root)
     write_json(out_dir / "comparison_summary.json", comparison)
     print(json.dumps(comparison, ensure_ascii=False, indent=2))
     return 0
@@ -112,7 +172,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="gpt-5-mini")
     parser.add_argument("--sample-size", type=int, default=10)
     parser.add_argument("--seed", type=int, default=20260704)
+    parser.add_argument(
+        "--llm-seed",
+        type=int,
+        default=20260804,
+        help="OpenAI-compatible request seed shared by every arm for paired comparisons.",
+    )
     parser.add_argument("--selected-cases-file")
+    parser.add_argument(
+        "--arm",
+        choices=["both", "all", "baseline_no_skill", "project_only", "strategy_only", "with_skill"],
+        default="both",
+        help="Run a recovery arm, the historical two-arm comparison, or all four ablation arms.",
+    )
     parser.add_argument("--hf-endpoint", default=DEFAULT_HF_ENDPOINT)
     parser.add_argument("--swe-explore-dataset", default=SWE_EXPLORE_DATASET)
     parser.add_argument("--swe-verified-dataset", default=SWE_VERIFIED_DATASET)
@@ -121,10 +193,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-filter", default="verified")
     parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument("--case-timeout-seconds", type=float, default=1200.0)
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--llm-max-attempts",
+        type=int,
+        default=None,
+        help="Optional transport retry limit for transient provider failures during a long evaluation.",
+    )
+    parser.add_argument(
+        "--llm-timeout",
+        type=int,
+        default=None,
+        help="Optional per-request transport timeout in seconds for a recoverable evaluation run.",
+    )
     parser.add_argument("--retrieval-mode", choices=["lexical", "embedding", "hybrid"], default="embedding")
     parser.add_argument("--embedding-base-url", default="http://127.0.0.1:8008")
     parser.add_argument("--embedding-timeout", type=float)
     parser.add_argument("--embedding-min-score", type=float, default=0.48)
+    parser.add_argument(
+        "--skill-bank-path",
+        default="skill_pools/skill_bank_v0/skills.jsonl",
+        help="SkillBank used exclusively by the with_skill arm.",
+    )
+    parser.add_argument(
+        "--embedding-cache-path",
+        default="",
+        help="Optional embedding cache paired with --skill-bank-path.",
+    )
     parser.add_argument("--rebuild-embeddings", action="store_true", default=True)
     parser.add_argument("--force-recopy-repos", action="store_true")
     parser.add_argument(
@@ -134,6 +229,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-pull-images", action="store_true")
     parser.add_argument("--github-archive-mirror", default="")
+    parser.add_argument("--repo-cache-root")
+    parser.add_argument(
+        "--repo-mode",
+        choices=["shared_readonly", "copy"],
+        default="copy",
+        help="Create an arm-local repository copy by default; shared reuse is only safe when tools cannot mutate files.",
+    )
+    parser.add_argument(
+        "--runtime-repo-root",
+        default="",
+        help=(
+            "Optional local filesystem root for mutable arm repository copies. "
+            "Keeping Explorer workspaces off /mnt drives avoids WSL 9P I/O during tool calls."
+        ),
+    )
+    parser.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Select/materialize cases and rebuild embeddings without running Explorer.",
+    )
+    parser.add_argument(
+        "--rerun-existing",
+        action="store_true",
+        help="Rerun cases that already have a result.json instead of resuming them.",
+    )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="Rebuild metrics from existing arm outputs without materialization or LLM calls.",
+    )
     return parser
 
 
@@ -178,7 +303,9 @@ def _merge_case(explore_row: dict[str, Any], verified_row: dict[str, Any]) -> di
 
 
 def load_selected_cases(path: str) -> list[dict[str, Any]]:
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    # PowerShell's UTF-8 writer may emit a BOM; selected manifests are shared
+    # between the Windows workspace and WSL evaluation runner.
+    data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     if not isinstance(data, list):
         raise ValueError("--selected-cases-file must contain a JSON list.")
     return data
@@ -220,6 +347,31 @@ def materialize_selected_cases(
             )
         except Exception as exc:  # noqa: BLE001 - keep the full materialization report.
             report["failed"].append({"instance_id": case["instance_id"], "repo": case.get("repo"), "error": str(exc)})
+    return report
+
+
+def validate_repo_cache(selected: list[dict[str, Any]], base_root: Path) -> dict[str, Any]:
+    report = {"prepared": [], "failed": []}
+    for case in selected:
+        repo_dir = base_root / safe_name(case["instance_id"])
+        if repo_dir.is_dir() and any(repo_dir.iterdir()):
+            report["prepared"].append(
+                {
+                    "instance_id": case["instance_id"],
+                    "repo": case["repo"],
+                    "base_commit": case["base_commit"],
+                    "repo_dir": str(repo_dir),
+                    "source": "external_repo_cache",
+                }
+            )
+        else:
+            report["failed"].append(
+                {
+                    "instance_id": case["instance_id"],
+                    "repo": case.get("repo"),
+                    "error": f"Missing cached repository: {repo_dir}",
+                }
+            )
     return report
 
 
@@ -271,8 +423,7 @@ def materialize_repo_from_archive(case: dict[str, Any], repo_dir: Path, *, mirro
     last_error: Exception | None = None
     for attempt in range(1, 4):
         try:
-            with urllib.request.urlopen(url, timeout=600) as response:
-                tmp.write_bytes(response.read())
+            _download_github_archive(url, tmp)
             with tarfile.open(tmp, mode="r:gz") as tar:
                 members = tar.getmembers()
                 if not members:
@@ -295,6 +446,38 @@ def materialize_repo_from_archive(case: dict[str, Any], repo_dir: Path, *, mirro
     raise RuntimeError(str(last_error) if last_error else f"Failed to download archive: {url}")
 
 
+def _download_github_archive(url: str, destination: Path) -> None:
+    """Download a source archive without inheriting WSL's unreliable IPv6 path.
+
+    GitHub archive requests can stall in WSL even when normal TCP connectivity
+    is available.  Curl's IPv4/HTTP1.1 path is reliable in that environment;
+    urllib remains a portable fallback where curl is unavailable.
+    """
+
+    curl = shutil.which("curl")
+    if curl:
+        run(
+            [
+                curl,
+                "--fail",
+                "--location",
+                "--http1.1",
+                "--ipv4",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "180",
+                "--output",
+                str(destination),
+                url,
+            ],
+            timeout=190,
+        )
+        return
+    with urllib.request.urlopen(url, timeout=180) as response:
+        destination.write_bytes(response.read())
+
+
 def make_no_skill_config(config: dict[str, Any], out_dir: Path) -> dict[str, Any]:
     clone = json.loads(json.dumps(config))
     empty_skill_path = out_dir / "empty_skill_bank" / "skills.jsonl"
@@ -311,13 +494,22 @@ def make_no_skill_config(config: dict[str, Any], out_dir: Path) -> dict[str, Any
 def make_skill_config(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     clone = json.loads(json.dumps(config))
     clone.setdefault("skill_bank", {})
+    clone["skill_bank"]["path"] = args.skill_bank_path
     clone["skill_bank"]["retrieval_mode"] = args.retrieval_mode
     clone["skill_bank"]["embedding_min_score"] = args.embedding_min_score
     clone.setdefault("embedding", {})
     clone["embedding"]["enabled"] = True
     clone["embedding"]["base_url"] = args.embedding_base_url
+    if args.embedding_cache_path:
+        clone["embedding"]["cache_path"] = args.embedding_cache_path
     if args.embedding_timeout is not None:
         clone["embedding"]["timeout"] = args.embedding_timeout
+    return clone
+
+
+def make_type_limited_skill_config(config: dict[str, Any], skill_type: str) -> dict[str, Any]:
+    clone = json.loads(json.dumps(config))
+    clone.setdefault("skill_bank", {})["enabled_skill_types"] = [skill_type]
     return clone
 
 
@@ -328,6 +520,8 @@ def run_arm(
     base_repo_root: Path,
     out_dir: Path,
     config: dict[str, Any],
+    repo_mode: str,
+    runtime_repo_root: Path | None = None,
 ) -> dict[str, Any]:
     arm_dir = out_dir / arm_name
     arm_dir.mkdir(parents=True, exist_ok=True)
@@ -340,7 +534,11 @@ def run_arm(
         case_dir.mkdir(parents=True, exist_ok=True)
         write_json(case_dir / "task.json", case)
         base_repo = base_repo_root / safe_name(case["instance_id"])
-        arm_repo = arm_dir / "repos" / safe_name(case["instance_id"])
+        arm_repo = (
+            base_repo
+            if repo_mode == "shared_readonly"
+            else (runtime_repo_root or arm_dir / "repos") / arm_name / safe_name(case["instance_id"])
+        )
         summary = {
             "index": index,
             "instance_id": case["instance_id"],
@@ -348,33 +546,59 @@ def run_arm(
             "explorer_status": "not_started",
         }
         try:
-            prepare_arm_repo(base_repo, arm_repo)
-            result = run_explorer(
-                task={
-                    "instance_id": case["instance_id"],
-                    "repo_path": str(arm_repo),
-                    "repo": case["repo"],
-                    "base_commit": case["base_commit"],
-                    "bug_report": case["problem_statement"],
-                    "run_dir": str(case_dir),
-                },
-                config=config,
-                llm_client=client,
-                skill_bank=skill_bank,
-            )
+            if repo_mode == "copy":
+                prepare_arm_repo(base_repo, arm_repo)
+            result_path = case_dir / "result.json"
+            if result_path.exists() and not config.get("_rerun_existing", False):
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                summary["resumed"] = True
+            else:
+                result = run_explorer(
+                    task={
+                        "instance_id": case["instance_id"],
+                        "repo_path": str(arm_repo),
+                        "repo": case["repo"],
+                        "base_commit": case["base_commit"],
+                        "bug_report": case["problem_statement"],
+                        "run_dir": str(case_dir),
+                    },
+                    config=config,
+                    llm_client=client,
+                    skill_bank=skill_bank,
+                )
             summary["explorer_status"] = result.get("status")
             summary["ranked_functions"] = result.get("ranked_functions", [])
         except Exception as exc:  # noqa: BLE001 - isolate case failures.
             summary["explorer_status"] = classify_explorer_error(exc)
             summary["error"] = str(exc)
+            write_json(
+                case_dir / "error.json",
+                {
+                    "instance_id": case["instance_id"],
+                    "status": summary["explorer_status"],
+                    "error": str(exc),
+                },
+            )
         summaries.append(summary)
         write_json(arm_dir / "progress_summary.json", {"cases": summaries})
-    arm_summary = {"arm": arm_name, "case_count": len(selected), "cases": summaries}
+    arm_summary = {
+        "arm": arm_name,
+        "case_count": len(selected),
+        "repo_mode": repo_mode,
+        "runtime_repo_root": str(runtime_repo_root) if runtime_repo_root else "",
+        "cases": summaries,
+    }
     write_json(arm_dir / "summary.json", arm_summary)
     return arm_summary
 
 
-def build_comparison(out_dir: Path, selected: list[dict[str, Any]], arm_summaries: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def build_comparison(
+    out_dir: Path,
+    selected: list[dict[str, Any]],
+    arm_summaries: dict[str, dict[str, Any]],
+    *,
+    base_repo_root: Path | None = None,
+) -> dict[str, Any]:
     arm_metrics: dict[str, Any] = {}
     for arm_name, arm_summary in arm_summaries.items():
         arm_dir = out_dir / arm_name
@@ -382,48 +606,122 @@ def build_comparison(out_dir: Path, selected: list[dict[str, Any]], arm_summarie
         read_rows = []
         for case in selected:
             case_dir = arm_dir / "cases" / case["instance_id"]
-            repo_dir = arm_dir / "repos" / safe_name(case["instance_id"])
+            repo_dir = (
+                base_repo_root / safe_name(case["instance_id"])
+                if base_repo_root is not None
+                else arm_dir / "repos" / safe_name(case["instance_id"])
+            )
             final_regions = final_regions_from_result(case_dir / "result.json", repo_dir)
             read_regions = read_regions_from_trajectory(case_dir / "trajectory.jsonl")
             final_rows.append(score_case(case, final_regions, repo_dir, prediction_kind="final_function_regions"))
             read_rows.append(score_case(case, read_regions, repo_dir, prediction_kind="trajectory_read_regions"))
+        function_rows = [
+            score_function_case(
+                case,
+                arm_dir / "cases" / case["instance_id"] / "result.json",
+                (
+                    base_repo_root / safe_name(case["instance_id"])
+                    if base_repo_root is not None
+                    else arm_dir / "repos" / safe_name(case["instance_id"])
+                ),
+            )
+            for case in selected
+        ]
         final_summary = summarize_metric_rows(final_rows)
         read_summary = summarize_metric_rows(read_rows)
-        retrieval_rows = build_retrieval_rows(arm_dir, final_rows)
+        function_summary = summarize_function_rows(function_rows)
+        retrieval_rows = build_retrieval_rows(arm_dir, function_rows)
         arm_metrics[arm_name] = {
             "summary": summarize_arm(arm_dir, arm_summary, final_summary),
+            "function_metrics": without_cases(function_summary),
             "swe_explore_final_metrics": without_cases(final_summary),
             "swe_explore_read_trajectory_metrics": without_cases(read_summary),
             "tool_usage": summarize_tool_usage(arm_dir),
-            "retrieval_summary": summarize_retrieval(retrieval_rows),
+            "retrieval_summary": summarize_function_retrieval(retrieval_rows),
             "cases": retrieval_rows,
         }
         write_json(arm_dir / "swe_explore_final_region_metrics.json", final_summary)
         write_json(arm_dir / "swe_explore_read_trajectory_metrics.json", read_summary)
+        write_json(arm_dir / "patch_function_metrics.json", function_summary)
         write_json(arm_dir / "skill_retrieval_accuracy_summary.json", arm_metrics[arm_name])
-    no_skill = arm_metrics["baseline_no_skill"]["swe_explore_final_metrics"]
-    with_skill = arm_metrics["with_skill"]["swe_explore_final_metrics"]
+    no_skill = arm_metrics.get("baseline_no_skill", {}).get("function_metrics", {})
+    ablation_deltas = {
+        arm_name: {
+            key: metrics["function_metrics"].get(key, 0.0) - no_skill.get(key, 0.0)
+            for key in ["top1", "top3", "top5", "mrr"]
+        }
+        for arm_name, metrics in arm_metrics.items()
+        if arm_name != "baseline_no_skill"
+    }
+    with_skill = arm_metrics.get("with_skill", {}).get("function_metrics", {})
     return {
         "output_dir": str(out_dir),
         "dataset": SWE_EXPLORE_DATASET,
         "selected_instance_ids": [case["instance_id"] for case in selected],
         "same_cases": True,
-        "primary_metric_view": "swe_explore_final_metrics",
+        "primary_metric_view": "patch_function_metrics",
         "arms": arm_metrics,
-        "delta_final": {
+        "delta_function": {
             key: with_skill.get(key, 0.0) - no_skill.get(key, 0.0)
-            for key in [
-                "hit_file_rate",
-                "hit_region_rate",
-                "line_precision",
-                "line_recall",
-                "line_f1",
-                "mrr_region",
-                "top1_file",
-                "top3_file",
-                "top5_file",
-            ]
+            for key in ["top1", "top3", "top5", "mrr"]
         },
+        "ablation_delta_function": ablation_deltas,
+    }
+
+
+def _report_base_repo_root(out_dir: Path) -> Path | None:
+    report_path = out_dir / "materialization_report.json"
+    if not report_path.exists():
+        return None
+    try:
+        prepared = json.loads(report_path.read_text(encoding="utf-8")).get("prepared") or []
+        first_repo = prepared[0].get("repo_dir") if prepared else None
+        return Path(first_repo).parent if first_repo else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def score_function_case(case: dict[str, Any], result_path: Path, repo_dir: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if result_path.exists():
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    ranked = [
+        str(value)
+        for value in (
+            result.get("ranked_functions")
+            or result.get("finish", {}).get("action", {}).get("ranked_functions")
+            or []
+        )
+    ]
+    ground_truth = functions_from_patch(str(case.get("patch") or ""), repo_dir)
+    metrics = evaluate_ranked_functions(ranked, ground_truth) if ground_truth else {
+        "rank": None,
+        "matched_ground_truth": None,
+        "top1": False,
+        "top3": False,
+        "top5": False,
+        "reciprocal_rank": 0.0,
+    }
+    return {
+        "case": case["instance_id"],
+        "evaluable": bool(ground_truth),
+        "ranked_functions": ranked,
+        "ground_truth_functions": ground_truth,
+        **metrics,
+    }
+
+
+def summarize_function_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluable = [row for row in rows if row.get("evaluable")]
+    count = len(evaluable)
+    return {
+        "case_count": len(rows),
+        "evaluable_case_count": count,
+        "top1": sum(1 for row in evaluable if row.get("top1")) / count if count else 0.0,
+        "top3": sum(1 for row in evaluable if row.get("top3")) / count if count else 0.0,
+        "top5": sum(1 for row in evaluable if row.get("top5")) / count if count else 0.0,
+        "mrr": sum(float(row.get("reciprocal_rank", 0.0)) for row in evaluable) / count if count else 0.0,
+        "cases": rows,
     }
 
 
@@ -695,27 +993,108 @@ def build_retrieval_rows(arm_dir: Path, metric_rows: list[dict[str, Any]]) -> li
     metric_by_case = {row["case"]: row for row in metric_rows}
     rows = []
     for case_dir in sorted((arm_dir / "cases").iterdir()):
-        matched_path = case_dir / "matched_skills.json"
-        matched = json.loads(matched_path.read_text(encoding="utf-8")) if matched_path.exists() else []
-        counts = Counter(skill.get("skill_type", "unknown") for skill in matched)
+        loaded = load_staged_skills(case_dir)
+        matched = [skill for skill in loaded.values() if isinstance(skill, dict)]
+        counts = Counter(skill.get("skill_type", skill_type) for skill_type, skill in loaded.items() if skill)
         metric = metric_by_case.get(case_dir.name, {})
+        project_search = read_optional_json(case_dir / "project_skill_search.json")
+        strategy_search = read_optional_json(case_dir / "strategy_skill_search.json")
         rows.append(
             {
                 "case": case_dir.name,
                 "matched_skill_count": len(matched),
                 "matched_skill_types": sorted(counts),
                 "matched_skill_type_counts": dict(counts),
+                "loaded_skill_ids": {
+                    skill_type: skill.get("skill_id") if isinstance(skill, dict) else None
+                    for skill_type, skill in loaded.items()
+                },
                 "has_any_skill": bool(matched),
                 "has_project_skill": "project_skill" in counts,
                 "has_strategy_skill": "strategy_skill" in counts,
-                "top1": bool(metric.get("top1_file")),
-                "top3": bool(metric.get("top3_file")),
-                "top5": bool(metric.get("top5_file")),
-                "rank": metric.get("first_useful_rank"),
-                "mrr": metric.get("mrr_region", 0.0),
+                "project_skill_attempted": bool(project_search),
+                "strategy_skill_attempted": bool(strategy_search),
+                "project_top_score": first_top_score(project_search),
+                "strategy_selection_mode": (strategy_search.get("search_trace") or {}).get("retrieval_mode"),
+                "evaluable": bool(metric.get("evaluable")),
+                "top1": bool(metric.get("top1")),
+                "top3": bool(metric.get("top3")),
+                "top5": bool(metric.get("top5")),
+                "rank": metric.get("rank"),
+                "mrr": metric.get("reciprocal_rank", 0.0),
             }
         )
     return rows
+
+
+def load_staged_skills(case_dir: Path) -> dict[str, Any]:
+    loaded = read_optional_json(case_dir / "loaded_skills.json")
+    return {
+        "project_skill": loaded.get("project_skill"),
+        "strategy_skill": loaded.get("strategy_skill"),
+    }
+
+
+def read_optional_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def read_required_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Required report input is missing: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    return data
+
+
+def first_top_score(search: dict[str, Any]) -> float | None:
+    top_scores = (search.get("search_trace") or {}).get("top_scores") or []
+    if not top_scores:
+        return None
+    return float(top_scores[0]["score"])
+
+
+def summarize_function_retrieval(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluable = [row for row in rows if row.get("evaluable")]
+    project_loaded = [row for row in evaluable if row["has_project_skill"]]
+    strategy_loaded = [row for row in evaluable if row["has_strategy_skill"]]
+    return {
+        "all_evaluable": summarize_function_group(evaluable),
+        "any_skill": summarize_function_group([row for row in evaluable if row["has_any_skill"]]),
+        "no_skill": summarize_function_group([row for row in evaluable if not row["has_any_skill"]]),
+        "project_skill": summarize_function_group(project_loaded),
+        "strategy_skill": summarize_function_group(strategy_loaded),
+        "attempt_rates": {
+            "project_skill": (
+                sum(1 for row in rows if row["project_skill_attempted"]) / len(rows) if rows else 0.0
+            ),
+            "strategy_skill": (
+                sum(1 for row in rows if row["strategy_skill_attempted"]) / len(rows) if rows else 0.0
+            ),
+        },
+        "load_rates": {
+            "project_skill": sum(1 for row in rows if row["has_project_skill"]) / len(rows) if rows else 0.0,
+            "strategy_skill": sum(1 for row in rows if row["has_strategy_skill"]) / len(rows) if rows else 0.0,
+            "any_skill": sum(1 for row in rows if row["has_any_skill"]) / len(rows) if rows else 0.0,
+        },
+        "matched_skill_count_distribution": dict(Counter(row["matched_skill_count"] for row in rows)),
+    }
+
+
+def summarize_function_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    count = len(rows)
+    return {
+        "case_count": count,
+        "top1": sum(1 for row in rows if row["top1"]) / count if count else 0.0,
+        "top3": sum(1 for row in rows if row["top3"]) / count if count else 0.0,
+        "top5": sum(1 for row in rows if row["top5"]) / count if count else 0.0,
+        "mrr": sum(float(row["mrr"]) for row in rows) / count if count else 0.0,
+        "cases": [row["case"] for row in rows],
+    }
 
 
 def dedupe_regions(regions: list[tuple[str, int, int]]) -> list[tuple[str, int, int]]:

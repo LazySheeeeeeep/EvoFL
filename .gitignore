@@ -10,6 +10,7 @@ runs/
 .env.*
 .vscode/
 .agents/
+.tools/
 SkillOpt/
 skill_pools/skill_bank_v0/embeddings/
 skill_pools/skill_bank/embeddings/

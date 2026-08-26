@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,9 @@ TEXT_EXTENSIONS = {
     ".html",
     ".css",
 }
+# A single minified/generated source line must not consume the whole Explorer
+# context merely because it contains a requested literal.
+MAX_GREP_MATCH_TEXT_CHARS = 2_000
 
 
 def register_builtin_tools(
@@ -105,6 +111,11 @@ def grep(
     if not pattern:
         raise ValueError("pattern cannot be empty.")
     max_results = int(max_results or 50)
+    if not use_regex:
+        ripgrep_result = _grep_literal_with_ripgrep(root, pattern, glob=glob, max_results=max_results)
+        if ripgrep_result is not None:
+            return ripgrep_result
+
     matches: list[dict[str, Any]] = []
     regex = re.compile(pattern, re.IGNORECASE) if use_regex else None
     pattern_lower = pattern.lower()
@@ -118,7 +129,7 @@ def grep(
                             {
                                 "path": str(file_path.relative_to(root)).replace("\\", "/"),
                                 "line": line_no,
-                                "text": line.rstrip("\n"),
+                                "text": _truncate_grep_match_text(line.rstrip("\n")),
                             }
                         )
                         if len(matches) >= max_results:
@@ -126,6 +137,94 @@ def grep(
         except OSError:
             continue
     return {"pattern": pattern, "use_regex": use_regex, "matches": matches, "truncated": False}
+
+
+def _grep_literal_with_ripgrep(
+    root: Path,
+    pattern: str,
+    *,
+    glob: str | None,
+    max_results: int,
+) -> dict[str, Any] | None:
+    """Use rg for fast literal searches, falling back when it is unavailable.
+
+    Repository copies frequently live under the WSL-mounted Windows drive. A
+    Python file-by-file scan there is disproportionately slow, while ripgrep
+    performs the traversal natively. Regex requests retain the Python engine
+    below so their documented semantics remain unchanged.
+    """
+    ripgrep = os.environ.get("EVOLUTEFL_RIPGREP") or shutil.which("rg")
+    if not ripgrep:
+        return None
+
+    command = [
+        ripgrep,
+        "--no-heading",
+        "--color",
+        "never",
+        "--line-number",
+        "--with-filename",
+        "--ignore-case",
+        "--fixed-strings",
+    ]
+    if glob:
+        command.extend(["--glob", glob])
+    command.extend([pattern, "."])
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+
+    matches: list[dict[str, Any]] = []
+    assert process.stdout is not None
+    try:
+        for line in process.stdout:
+            parts = line.rstrip("\n").split(":", 2)
+            if len(parts) != 3 or not parts[1].isdigit():
+                continue
+            relative_path = parts[0].removeprefix("./").replace("\\", "/")
+            if any(part in SKIP_DIRS for part in Path(relative_path).parts):
+                continue
+            if not glob and Path(relative_path).suffix.lower() not in TEXT_EXTENSIONS:
+                continue
+            matches.append(
+                {
+                    "path": relative_path,
+                    "line": int(parts[1]),
+                    "text": _truncate_grep_match_text(parts[2]),
+                }
+            )
+            if len(matches) >= max_results:
+                process.terminate()
+                return {"pattern": pattern, "use_regex": False, "matches": matches, "truncated": True}
+    finally:
+        process.stdout.close()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+    return {"pattern": pattern, "use_regex": False, "matches": matches, "truncated": False}
+
+
+def _truncate_grep_match_text(text: str) -> str:
+    """Keep grep observations bounded while retaining both ends of long lines."""
+    if len(text) <= MAX_GREP_MATCH_TEXT_CHARS:
+        return text
+    head = 1_600
+    tail = 300
+    omitted = len(text) - head - tail
+    return f"{text[:head]} ... [truncated {omitted} characters] ... {text[-tail:]}"
 
 
 def read_file(repo_path: str, path: str, start_line: int | None = None, end_line: int | None = None, max_lines: int = 200) -> dict[str, Any]:
@@ -169,16 +268,20 @@ def _write_factory(run_dir: str | Path | None):
 
 
 def _iter_text_files(root: Path, *, glob_pattern: str | None = None):
-    for file_path in root.rglob("*"):
-        if any(part in SKIP_DIRS for part in file_path.parts):
-            continue
-        if not file_path.is_file():
-            continue
-        if glob_pattern and not fnmatch.fnmatch(str(file_path.relative_to(root)).replace("\\", "/"), glob_pattern):
-            continue
-        if file_path.suffix.lower() not in TEXT_EXTENSIONS:
-            continue
-        yield file_path
+    # Prune expensive trees before descending. Path.rglob() filters them only
+    # after traversal, which makes a simple search unexpectedly slow in large
+    # repositories with vendored dependencies or VCS metadata.
+    for current_root, directories, filenames in os.walk(root):
+        directories[:] = [directory for directory in directories if directory not in SKIP_DIRS]
+        current_path = Path(current_root)
+        for filename in filenames:
+            file_path = current_path / filename
+            if file_path.suffix.lower() not in TEXT_EXTENSIONS:
+                continue
+            relative_path = str(file_path.relative_to(root)).replace("\\", "/")
+            if glob_pattern and not fnmatch.fnmatch(relative_path, glob_pattern):
+                continue
+            yield file_path
 
 
 def _grep_schema(*, include_repo_path: bool = True) -> dict[str, Any]:

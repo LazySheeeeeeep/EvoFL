@@ -22,12 +22,15 @@ def test_new_project_skill_schema_round_trip() -> None:
     }
     skill = DimensionSkill.from_dict(record)
     assert skill.skill_type == "project_skill"
-    assert skill.scope == "architecture_family"
     saved = skill.to_dict()
     assert saved["skill_type"] == "project_skill"
+    assert "scope" not in saved
     assert "dimension" not in saved
     assert "retrieval_text" not in saved
-    assert skill.compact_dict()["scope"] == "architecture_family"
+    assert saved["skill"]["knowledge"] == [
+        "Configuration adapters connect external options to normalized internal state."
+    ]
+    assert "scope" not in skill.compact_dict()
 
 
 def test_legacy_project_and_strategy_types_are_mapped() -> None:
@@ -45,7 +48,6 @@ def test_legacy_project_and_strategy_types_are_mapped() -> None:
     }
     skill = DimensionSkill.from_dict(legacy)
     assert skill.skill_type == "strategy_skill"
-    assert skill.scope == "contextual"
 
 
 def test_legacy_fault_mode_is_not_loaded_into_two_type_bank() -> None:
@@ -58,20 +60,5 @@ def test_legacy_fault_mode_is_not_loaded_into_two_type_bank() -> None:
                 "dimension": "fault_mode",
                 "value": "missing_data",
                 "skill": {"title": "Old", "trigger": "Old", "knowledge": "Old"},
-            }
-        )
-
-
-def test_invalid_scope_rejected() -> None:
-    with pytest.raises(ValueError, match="Invalid scope"):
-        DimensionSkill.from_dict(
-            {
-                "skill_id": "bad",
-                "status": "active",
-                "version": 1,
-                "skill_type": "strategy_skill",
-                "scope": "repository",
-                "value": "bad",
-                "skill": {"title": "Bad", "trigger": "Bad", "knowledge": "Bad"},
             }
         )
