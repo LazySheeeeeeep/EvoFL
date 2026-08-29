@@ -117,8 +117,10 @@ def test_v3_case_evolution_separates_project_builder_from_case_reflector(tmpdir)
         {"content": json.dumps({"issue_skill_query": "incorrect state through adapter boundary", "strategy_diagnostic_context": "producer competes with reporter", "selected_strategy_skill_id": None, "strategy_selection_reason": "no catalog match"})},
         {"content": json.dumps({"case_summary": "issue lesson", "skill_updates": {
             "issue_skill": {"decision": "create_new", "target_skill_id": None, "rationale": "reusable path", "skill": {"value": "wrong_state_boundary", "title": "Wrong state boundary", "trigger": "Use when a reported state differs after an adapter boundary.", "knowledge": [{"text": "When reported state diverges, inspect the adaptation boundary that first changes its representation."}]}, "knowledge_edit": None, "no_update_reason": None},
-            "strategy_skill": _no_update(),
         }, "no_update_reason": None})},
+        {"content": json.dumps({"case_summary": "ranking not applicable", "skill_updates": {
+            "strategy_skill": _no_update(),
+        }, "no_update_reason": "Ground truth was absent from Top-5."})},
     ])
     summary = run_case_evolution(case_run_dir=case, repo="demo/repo", issue="wrong state", config=config,
                                   llm_client=fake, ground_truth_functions=["right.py::produce"])
@@ -132,6 +134,16 @@ def test_v3_case_evolution_separates_project_builder_from_case_reflector(tmpdir)
     records = [json.loads(line) for line in skills.read_text(encoding="utf-8").splitlines() if line]
     assert [record["skill_type"] for record in records] == ["issue_skill"]
     assert (case / "case_evolution" / "reflector_skill_search_context.json").exists()
+    assert (case / "case_evolution" / "issue_reflector_output.json").exists()
+    assert (case / "case_evolution" / "strategy_reflector_output.json").exists()
+    assert summary["learning_signals"]["issue_skill"]["label"] == "failure"
+    assert summary["learning_signals"]["strategy_skill"]["label"] == "not_applicable"
+    issue_call_payload = json.loads(fake.calls[2]["messages"][1]["content"])
+    strategy_call_payload = json.loads(fake.calls[3]["messages"][1]["content"])
+    assert set(issue_call_payload["skill_search_context"]["candidates_by_skill_type"]) == {"issue_skill"}
+    assert set(strategy_call_payload["skill_search_context"]["candidates_by_skill_type"]) == {"strategy_skill"}
+    assert issue_call_payload["trajectory_evidence"]["reflection_scope"].startswith("Issue-guided")
+    assert strategy_call_payload["trajectory_evidence"]["reflection_scope"].startswith("Comparison")
     assert len(json.loads(skills.read_text(encoding="utf-8").splitlines()[0])) > 0
 
 

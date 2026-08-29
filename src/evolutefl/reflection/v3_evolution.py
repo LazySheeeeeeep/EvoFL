@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from evolutefl.config import resolve_path
+from evolutefl.evaluation import evaluate_ranked_functions
 from evolutefl.json_utils import extract_json_object, write_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.skills import make_skill_bank
@@ -80,11 +81,53 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
         strategy_diagnostic_context=queries["strategy_diagnostic_context"],
         limit_per_type=int((config.get("reflection") or {}).get("reflector_candidate_top_k", 5)))
     write_json(out_dir / "reflector_skill_search_context.json", context)
-    prompt = resolve_path((config.get("reflection") or {}).get("reflector_prompt_path", "prompt_records/reflection/reflector_skill_v0.txt")).read_text(encoding="utf-8")
-    output = run_reflector(trajectory_evidence=evidence, evolution_queries=queries, skill_search_context=context,
-                           llm_client=client, prompt=prompt, attempts=int((config.get("reflection") or {}).get("reflector_attempts", 2)),
-                           output_path=out_dir / "reflector_debug.json", skill_types=("issue_skill", "strategy_skill"),
-                           strict_final_cards=True, isolate_skill_errors_on_final_attempt=True)
+    reflection_config = config.get("reflection") or {}
+    learning_signals = _reflection_learning_signals(
+        result.get("ranked_functions") or [], ground_truth
+    )
+    issue_evidence = _build_skill_reflection_view(
+        evidence=evidence, trajectory=trajectory, skill_type="issue_skill",
+        learning_signal=learning_signals["issue_skill"],
+    )
+    strategy_evidence = _build_skill_reflection_view(
+        evidence=evidence, trajectory=trajectory, skill_type="strategy_skill",
+        learning_signal=learning_signals["strategy_skill"],
+    )
+    issue_context = _skill_type_context(context, "issue_skill")
+    strategy_context = _skill_type_context(context, "strategy_skill")
+    write_json(out_dir / "issue_reflection_view.json", issue_evidence)
+    write_json(out_dir / "strategy_reflection_view.json", strategy_evidence)
+
+    issue_prompt = resolve_path(reflection_config.get(
+        "issue_reflector_prompt_path", "prompt_records/reflection/issue_reflector_v3.txt"
+    )).read_text(encoding="utf-8")
+    strategy_prompt = resolve_path(reflection_config.get(
+        "strategy_reflector_prompt_path", "prompt_records/reflection/strategy_reflector_v3.txt"
+    )).read_text(encoding="utf-8")
+    reflector_attempts = int(reflection_config.get("reflector_attempts", 2))
+    issue_output = run_reflector(
+        trajectory_evidence=issue_evidence,
+        evolution_queries={"issue_skill_query": queries["issue_skill_query"]},
+        skill_search_context=issue_context, llm_client=client, prompt=issue_prompt,
+        attempts=reflector_attempts, output_path=out_dir / "issue_reflector_debug.json",
+        skill_types=("issue_skill",), strict_final_cards=True,
+        isolate_skill_errors_on_final_attempt=True,
+    )
+    write_json(out_dir / "issue_reflector_output.json", issue_output)
+    strategy_output = run_reflector(
+        trajectory_evidence=strategy_evidence,
+        evolution_queries={
+            "strategy_diagnostic_context": queries["strategy_diagnostic_context"],
+            "selected_strategy_skill_id": queries.get("selected_strategy_skill_id"),
+            "strategy_selection_reason": queries.get("strategy_selection_reason", ""),
+        },
+        skill_search_context=strategy_context, llm_client=client, prompt=strategy_prompt,
+        attempts=reflector_attempts, output_path=out_dir / "strategy_reflector_debug.json",
+        skill_types=("strategy_skill",), strict_final_cards=True,
+        isolate_skill_errors_on_final_attempt=True,
+    )
+    write_json(out_dir / "strategy_reflector_output.json", strategy_output)
+    output = _merge_reflector_outputs(issue_output, strategy_output, learning_signals)
     write_json(out_dir / "reflector_output.json", output)
     applied, applied_materialized, failed = [], [], []
     for update in output.get("materialized_updates", []):
@@ -102,7 +145,8 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
     write_json(out_dir / "applied_updates.json", applied)
     write_json(out_dir / "failed_updates.json", failed)
     summary["applied_updates"].extend(applied)
-    summary.update({"evolution_queries": queries, "skill_updates": output.get("skill_updates"),
+    summary.update({"evolution_queries": queries, "learning_signals": learning_signals,
+                    "skill_updates": output.get("skill_updates"),
                     "updated_skill_ids": [item.get("updated_skill_id") for item in summary["applied_updates"] if item.get("updated_skill_id")],
                     "failed_updates": failed})
     materialized_updates = [
@@ -121,6 +165,153 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
     })
     write_json(out_dir / "case_evolution_summary.json", summary)
     return summary
+
+
+def _reflection_learning_signals(
+    ranked_functions: list[str], ground_truth_functions: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Separate candidate-formation learning from final-ranking learning."""
+
+    metrics = evaluate_ranked_functions(ranked_functions, ground_truth_functions)
+    rank = metrics.get("rank")
+    issue_signal = {
+        "label": "success" if metrics.get("top5") else "failure",
+        "target_rank": rank,
+        "reason": (
+            "The ground-truth function entered the final Top-5 candidate set."
+            if metrics.get("top5")
+            else "The ground-truth function never entered the final Top-5 candidate set."
+        ),
+        "learning_scope": "issue-guided candidate formation",
+    }
+    if rank == 1:
+        strategy_label = "success"
+        strategy_reason = "The ground-truth function was ranked first."
+    elif isinstance(rank, int) and rank <= 5:
+        strategy_label = "failure"
+        strategy_reason = "The ground-truth function was found but ranked below another candidate."
+    else:
+        strategy_label = "not_applicable"
+        strategy_reason = (
+            "The ground-truth function was absent from Top-5, so final re-ranking cannot repair "
+            "candidate formation."
+        )
+    return {
+        "issue_skill": issue_signal,
+        "strategy_skill": {
+            "label": strategy_label, "target_rank": rank, "reason": strategy_reason,
+            "learning_scope": "candidate comparison and final ranking",
+        },
+    }
+
+
+def _build_skill_reflection_view(
+    *, evidence: dict[str, Any], trajectory: list[dict[str, Any]],
+    skill_type: str, learning_signal: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a stage-bounded evidence view for one independent Reflector."""
+
+    if skill_type == "issue_skill":
+        phase_events = _events_between(
+            trajectory, start_event="issue_revealed", stop_event="strategy_skill_request"
+        )
+        stage_state = {
+            name: (evidence.get("stage_state") or {}).get(name)
+            for name in ("project_skill", "issue_skill")
+        }
+        scope = "Issue-guided exploration and formation of the final candidate set."
+    else:
+        phase_events = _events_between(
+            trajectory, start_event="strategy_skill_request", stop_event=None
+        )
+        stage_state = {
+            "strategy_skill": (evidence.get("stage_state") or {}).get("strategy_skill")
+        }
+        scope = "Comparison of concrete candidates and their final ordering."
+    view = {
+        "case": evidence.get("case") or {},
+        "problem_statement": evidence.get("problem_statement", ""),
+        "outcome": learning_signal,
+        "reflection_scope": scope,
+        "prediction": evidence.get("prediction") or {},
+        "ground_truth": evidence.get("ground_truth") or {},
+        "stage_state": stage_state,
+    }
+    view.update(build_compacted_trajectory(phase_events, head_events=10, tail_events=14))
+    return view
+
+
+def _events_between(
+    trajectory: list[dict[str, Any]], *, start_event: str, stop_event: str | None
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    active = False
+    finish_events: list[dict[str, Any]] = []
+    for event in trajectory:
+        kind = str(event.get("event") or "")
+        if kind == "finish":
+            finish_events.append(event)
+        if kind == start_event:
+            active = True
+        if active and stop_event and kind == stop_event:
+            break
+        if active:
+            selected.append(event)
+    if stop_event:
+        selected.extend(event for event in finish_events if event not in selected)
+    return selected
+
+
+def _skill_type_context(context: dict[str, Any], skill_type: str) -> dict[str, Any]:
+    """Expose only same-type candidates to one Reflector call."""
+
+    candidates = list((context.get("candidates_by_skill_type") or {}).get(skill_type) or [])
+    result = {
+        "queries": {skill_type: (context.get("queries") or {}).get(skill_type)},
+        "candidates_by_skill_type": {skill_type: candidates},
+        "candidate_target_skills": candidates,
+        "search_traces": {
+            skill_type: (context.get("search_traces") or {}).get(skill_type) or {}
+        },
+    }
+    if skill_type == "strategy_skill":
+        result["selected_strategy_skill_id"] = context.get("selected_strategy_skill_id")
+    return result
+
+
+def _merge_reflector_outputs(
+    issue_output: dict[str, Any], strategy_output: dict[str, Any],
+    learning_signals: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Keep the historical combined artifact while preserving call isolation."""
+
+    materialized = [
+        *(issue_output.get("materialized_updates") or []),
+        *(strategy_output.get("materialized_updates") or []),
+    ]
+    reasons = [
+        str(value.get("no_update_reason") or "").strip()
+        for value in (issue_output, strategy_output) if value.get("no_update_reason")
+    ]
+    return {
+        "case_summary": " | ".join(filter(None, [
+            str(issue_output.get("case_summary") or "").strip(),
+            str(strategy_output.get("case_summary") or "").strip(),
+        ])),
+        "outcome_type": str((learning_signals.get("issue_skill") or {}).get("label") or "failure"),
+        "learning_signals": learning_signals,
+        "skill_updates": {
+            "issue_skill": (issue_output.get("skill_updates") or {}).get("issue_skill"),
+            "strategy_skill": (strategy_output.get("skill_updates") or {}).get("strategy_skill"),
+        },
+        "materialized_updates": materialized,
+        "protocol_errors": [
+            *(issue_output.get("protocol_errors") or []),
+            *(strategy_output.get("protocol_errors") or []),
+        ],
+        "no_update_reason": None if materialized else "; ".join(reasons) or "No reusable update was selected.",
+        "reflection_runs": {"issue_skill": issue_output, "strategy_skill": strategy_output},
+    }
 
 
 def _report_operation(action: Any) -> str:

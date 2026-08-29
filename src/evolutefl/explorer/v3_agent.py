@@ -164,8 +164,17 @@ class V3ExplorerAgent(ExplorerAgent):
         ])
 
         manifest = _repository_manifest(repo_path)
-        initial_payload = {"instance_id": task.get("instance_id"), "repo": repo,
-                           "base_commit": task.get("base_commit", ""), "repository_manifest": manifest}
+        initial_payload = {
+            "stage": "repository_orientation",
+            "objective": (
+                "Inspect repository structure and representative code to form a minimal system model, "
+                "then call load_project_skill."
+            ),
+            "instance_id": task.get("instance_id"),
+            "repo": repo,
+            "base_commit": task.get("base_commit", ""),
+            "repository_manifest": manifest,
+        }
         write_json(run_dir / "initial_payload.json", initial_payload)
         write_json(run_dir / "repository_manifest.json", manifest)
         loaded: dict[str, Any] = {"project_skill": None, "issue_skill": None, "strategy_skill": None}
@@ -227,7 +236,7 @@ class V3ExplorerAgent(ExplorerAgent):
             invalid = 0
             messages.append({"role": "assistant", "content": response.get("content") or "", "tool_calls": calls})
             append_jsonl(run_dir / "trajectory.jsonl", {"event": "assistant_tool_calls", "step": step, "stage": stage, "tool_calls": calls})
-            pending_issue_payload: dict[str, Any] | None = None
+            pending_stage_payloads: list[dict[str, Any]] = []
             allowed_tool_names = {
                 str((tool.get("function") or {}).get("name") or "")
                 for tool in tools
@@ -254,7 +263,15 @@ class V3ExplorerAgent(ExplorerAgent):
                             # immediately after its assistant tool_call. Queue
                             # the stage-transition user message until all tool
                             # replies from this assistant turn have been added.
-                            pending_issue_payload = {"issue": issue, "project_skill": loaded_skill}
+                            pending_stage_payloads.append({
+                                "stage": "issue_skill_selection",
+                                "objective": (
+                                    "Use the issue and repository orientation to describe a reusable issue "
+                                    "pattern, then call load_issue_skill."
+                                ),
+                                "issue": issue,
+                                "project_skill": loaded_skill,
+                            })
                 elif name == ISSUE_SKILL_TOOL:
                     if not project_attempted:
                         message = _tool_error(call, "Project Skill retrieval must be attempted before the issue stage.")
@@ -270,6 +287,15 @@ class V3ExplorerAgent(ExplorerAgent):
                             project_skill=loaded["project_skill"],
                         )
                         loaded["issue_skill"], issue_attempted = loaded_skill, True
+                        pending_stage_payloads.append({
+                            "stage": "issue_guided_localization",
+                            "objective": (
+                                "Use the issue as the primary anchor and the loaded Issue Skill as guidance. "
+                                "Collect repository evidence, form concrete function candidates, then call "
+                                "load_strategy_skill when a ranking uncertainty remains."
+                            ),
+                            "issue_skill": loaded_skill,
+                        })
                 elif name == STRATEGY_SKILL_TOOL:
                     if not issue_attempted:
                         message = _tool_error(call, "Issue Skill retrieval must be attempted before diagnostic ranking.")
@@ -279,6 +305,15 @@ class V3ExplorerAgent(ExplorerAgent):
                         message, loaded_skill = self._load_stage_skill(call, "strategy_skill", run_dir, step)
                         loaded["strategy_skill"], strategy_attempted = loaded_skill, True
                         strategy_evidence_observed = loaded_skill is None
+                        pending_stage_payloads.append({
+                            "stage": "diagnostic_ranking",
+                            "objective": (
+                                "Use repository evidence to resolve the candidate comparison. Treat the Strategy "
+                                "Skill as a conditional hint, verify its distinguishing observation when one was "
+                                "loaded, then call finish_localization."
+                            ),
+                            "strategy_skill": loaded_skill,
+                        })
                 elif name == FINISH_TOOL_NAME:
                     if project_attempted and issue_attempted and strategy_attempted and strategy_evidence_observed:
                         final_result = self._parse_finish_tool_call(call)
@@ -306,13 +341,23 @@ class V3ExplorerAgent(ExplorerAgent):
                         append_jsonl(run_dir / "trajectory.jsonl", {"event": "strategy_skill_evidence_observation", "step": step, "tool_name": name, "skill_id": loaded["strategy_skill"].get("skill_id")})
                 messages.append(message)
                 append_jsonl(run_dir / "trajectory.jsonl", {"event": "tool_result", "step": step, **message})
-            if pending_issue_payload is not None:
-                write_json(run_dir / "issue_payload.json", pending_issue_payload)
-                messages.append({"role": "user", "content": json.dumps(pending_issue_payload, ensure_ascii=False, indent=2)})
-                append_jsonl(run_dir / "trajectory.jsonl", {
-                    "event": "issue_revealed", "step": step, "issue_payload": pending_issue_payload,
+            for stage_payload in pending_stage_payloads:
+                if stage_payload["stage"] == "issue_skill_selection":
+                    write_json(run_dir / "issue_payload.json", stage_payload)
+                    append_jsonl(run_dir / "trajectory.jsonl", {
+                        "event": "issue_revealed", "step": step, "issue_payload": stage_payload,
+                    })
+                    issue_revealed = True
+                else:
+                    write_json(run_dir / f"{stage_payload['stage']}_instruction.json", stage_payload)
+                messages.append({
+                    "role": "user",
+                    "content": json.dumps(stage_payload, ensure_ascii=False, indent=2),
                 })
-                issue_revealed = True
+                append_jsonl(run_dir / "trajectory.jsonl", {
+                    "event": "stage_instruction", "step": step,
+                    "stage": stage_payload["stage"], "objective": stage_payload["objective"],
+                })
             write_json(run_dir / "loaded_skills.json", loaded)
             if final_result:
                 break
@@ -324,7 +369,12 @@ class V3ExplorerAgent(ExplorerAgent):
                 "component_roles": ["unknown component"], "responsibility_boundary": "unknown boundary"}), "project_skill", run_dir, -1)
             project_attempted = True
             if not issue_revealed:
-                issue_payload = {"issue": issue, "project_skill": loaded["project_skill"]}
+                issue_payload = {
+                    "stage": "issue_skill_selection",
+                    "objective": "Use the issue and repository orientation, then call load_issue_skill.",
+                    "issue": issue,
+                    "project_skill": loaded["project_skill"],
+                }
                 write_json(run_dir / "issue_payload.json", issue_payload)
                 messages.append({"role": "user", "content": json.dumps(issue_payload, ensure_ascii=False)})
                 append_jsonl(run_dir / "trajectory.jsonl", {

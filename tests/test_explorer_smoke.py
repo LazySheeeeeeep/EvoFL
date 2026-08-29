@@ -179,8 +179,11 @@ def test_v3_reveals_issue_only_after_project_attempt(tmpdir) -> None:
     assert result["ranked_functions"] == ["bug.py::culprit"]
     payload = json.loads((root / "v3_run" / "initial_payload.json").read_text(encoding="utf-8"))
     assert "bug_report" not in payload and "repository_manifest" in payload
+    assert payload["stage"] == "repository_orientation"
+    assert payload["objective"]
     issue_payload = json.loads((root / "v3_run" / "issue_payload.json").read_text(encoding="utf-8"))
     assert issue_payload["issue"] == _task(repo, root / "x")["bug_report"]
+    assert issue_payload["stage"] == "issue_skill_selection"
     # The issue stage transition follows the Project tool reply; otherwise an
     # OpenAI-compatible provider rejects the message history as malformed.
     second_messages = fake.calls[1]["messages"]
@@ -191,6 +194,26 @@ def test_v3_reveals_issue_only_after_project_attempt(tmpdir) -> None:
     assert second_messages[project_call_index + 1]["role"] == "tool"
     assert second_messages[project_call_index + 2]["role"] == "user"
     assert '"issue"' in second_messages[project_call_index + 2]["content"]
+    third_messages = fake.calls[2]["messages"]
+    issue_call_index = next(
+        index for index, message in enumerate(third_messages)
+        if message.get("role") == "assistant"
+        and any(
+            (call.get("function") or {}).get("name") == "load_issue_skill"
+            for call in message.get("tool_calls", [])
+        )
+    )
+    assert third_messages[issue_call_index + 1]["role"] == "tool"
+    assert third_messages[issue_call_index + 2]["role"] == "user"
+    assert '"stage": "issue_guided_localization"' in third_messages[issue_call_index + 2]["content"]
+    trajectory = [
+        json.loads(line)
+        for line in (root / "v3_run" / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    stage_instructions = [event for event in trajectory if event.get("event") == "stage_instruction"]
+    assert stage_instructions
+    assert any(event.get("stage") == "diagnostic_ranking" for event in stage_instructions)
     tool_sets = [{tool["function"]["name"] for tool in call["tools"]} for call in fake.calls]
     assert "load_project_skill" in tool_sets[0]
     assert tool_sets[1] == {"load_issue_skill"}

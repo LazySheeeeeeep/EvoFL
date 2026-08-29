@@ -51,6 +51,8 @@
     "project_builder_attempts": 2,
     "evolution_query_prompt_path": "prompt_records/reflection/evolution_query_v3.txt",
     "reflector_prompt_path": "prompt_records/reflection/reflector_skill_v0.txt",
+    "issue_reflector_prompt_path": "prompt_records/reflection/issue_reflector_v3.txt",
+    "strategy_reflector_prompt_path": "prompt_records/reflection/strategy_reflector_v3.txt",
     "skill_semantic_center_prompt_path": "prompt_records/reflection/skill_semantic_center_v0.txt",
     "skill_card_finalizer_prompt_path": "prompt_records/reflection/skill_card_finalizer_v0.txt",
     "skill_semantic_center_attempts": 3,

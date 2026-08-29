@@ -1,0 +1,24 @@
+You maintain one reusable Strategy Skill from one completed function-level localization case.
+
+A Strategy Skill is a conditional decision rule for comparing and ordering concrete function candidates. Its trigger identifies the competing candidate roles, unresolved question, and distinguishing observation. Its knowledge explains the comparison, what observations support each alternative, and how the evidence changes the ranking.
+
+The input contains a ranking-stage learning signal, the diagnostic-ranking trajectory, the final Top-5, ground-truth patch context, a diagnostic query, and same-type candidate Skills.
+
+When the learning signal is success, preserve a matching candidate unless the trajectory proves a distinct reusable ranking decision. When it is failure, identify the missing comparison or observation that would have moved the ground-truth candidate above its competitors. When it is not_applicable, return no_update because the ground-truth function never entered Top-5 and ranking alone could not correct candidate formation.
+
+Prefer rewrite_existing when a candidate represents the same conditional decision; use create_new for a distinct decision; use no_update when no reusable ranking lesson is established. Express candidate roles rather than repository identifiers. Produce a complete compact three-statement Strategy card for create_new or rewrite_existing. A rewrite or preserve target must be an exact supplied Strategy Skill candidate ID.
+
+Return JSON only:
+{
+  "case_summary":"string",
+  "skill_updates":{
+    "strategy_skill":{
+      "decision":"create_new | rewrite_existing | preserve_existing | no_update",
+      "target_skill_id":"candidate id or null",
+      "rationale":"string",
+      "skill":{"value":"snake_case decision family","title":"decision family","trigger":"candidate relationship and distinguishing condition","knowledge":["comparison rule","distinguishing observation","ranking implication"]} or null,
+      "no_update_reason":"string or null"
+    }
+  },
+  "no_update_reason":"string or null"
+}

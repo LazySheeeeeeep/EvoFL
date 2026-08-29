@@ -184,22 +184,41 @@ def run_reflector(
             messages = base_messages + [
                 {
                     "role": "user",
-                    "content": (
-                        "Return a corrected JSON object using the exact schema. A new Issue Skill "
-                        "has exactly one initial knowledge proposition; an Issue rewrite has exactly one "
-                        "knowledge_edit. Project and Strategy create_new or rewrite_existing cards "
-                        "provide exactly three knowledge statements at or below "
-                        f"{FINAL_MAX_STATEMENT_CHARS} characters. "
-                        "For create_new/no_update use target_skill_id null; for rewrite_existing/"
-                        "preserve_existing use an exact same-type candidate ID. "
-                        f"Validation feedback: {exc}"
-                    ),
+                    "content": _reflector_repair_instruction(skill_types, exc),
                 }
             ]
-    fallback = _no_update_fallback(trajectory_evidence, last_error)
+    fallback = _no_update_fallback(trajectory_evidence, last_error, skill_types=skill_types)
     if output_path:
         write_json(output_path, {"failed": True, "attempts": debug, "reflector_output": fallback})
     return fallback
+
+
+def _reflector_repair_instruction(
+    skill_types: tuple[str, ...] | None, error: Exception
+) -> str:
+    requested = tuple(skill_types or LEGACY_REFLECTOR_SKILL_TYPES)
+    if requested == ("issue_skill",):
+        contract = (
+            "Return only skill_updates.issue_skill. A create_new card has exactly one initial "
+            "knowledge proposition; rewrite_existing uses exactly one knowledge_edit."
+        )
+    elif requested == ("strategy_skill",):
+        contract = (
+            "Return only skill_updates.strategy_skill. A create_new or rewrite_existing card "
+            f"has exactly three knowledge statements at or below {FINAL_MAX_STATEMENT_CHARS} characters."
+        )
+    else:
+        contract = (
+            "A new Issue Skill has exactly one initial knowledge proposition; an Issue rewrite "
+            "has exactly one knowledge_edit. Project and Strategy create_new or rewrite_existing "
+            f"cards provide exactly three knowledge statements at or below {FINAL_MAX_STATEMENT_CHARS} characters."
+        )
+    return (
+        "Return a corrected JSON object using the exact schema. " + contract + " "
+        "For create_new/no_update use target_skill_id null; for rewrite_existing/"
+        "preserve_existing use an exact same-type candidate ID. "
+        f"Validation feedback: {error}"
+    )
 
 
 def finalize_skill_cards(
@@ -895,7 +914,12 @@ def _combined_no_update_reason(updates: dict[str, dict[str, Any]]) -> str:
     ) or "No reusable update was selected."
 
 
-def _no_update_fallback(trajectory_evidence: dict[str, Any], error: Exception | None) -> dict[str, Any]:
+def _no_update_fallback(
+    trajectory_evidence: dict[str, Any],
+    error: Exception | None,
+    *,
+    skill_types: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     reason = f"Reflector protocol failed: {error}" if error else "Reflector protocol failed."
     updates = {
         skill_type: {
@@ -905,7 +929,7 @@ def _no_update_fallback(trajectory_evidence: dict[str, Any], error: Exception | 
             "skill": None,
             "no_update_reason": reason,
         }
-        for skill_type in SKILL_TYPES
+        for skill_type in (skill_types or SKILL_TYPES)
     }
     return {
         "case_summary": "No SkillBank update was applied.",
