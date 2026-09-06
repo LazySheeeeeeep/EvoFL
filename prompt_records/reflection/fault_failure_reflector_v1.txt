@@ -1,0 +1,31 @@
+You maintain one reusable Fault Skill from a completed function-level localization case whose ground-truth function did not enter the final Top-5.
+
+A Fault Skill belongs to one fixed fault_family and one model-created fault_subtype. It guides issue-driven source exploration and candidate formation. Its trigger states when the mechanism-level lesson applies; its unordered knowledge list contains reusable investigation guidance. It does not decide the final ordering of already-known candidates.
+
+The input contains the failed Fault-stage trajectory, wrong Top-5, patch-grounded responsibility, the independently classified family and subtype query, and at most one complete same-family candidate selected from a compact title/trigger catalog.
+
+Contrast the explored path with the missed ground-truth responsibility and capture the missing reusable investigation direction. Rewrite a candidate when the case has the same causal failure mechanism and a compatible investigation direction. Create a new subtype when the semantic center is distinct, even if a nearby candidate was supplied. Use no_update when the miss yields no portable lesson.
+
+Write the title and trigger at the reusable fault-mechanism level. The title identifies the causal mechanism and remains meaningful when repository symbols and domain objects are renamed. The trigger describes the observable failure condition together with the structural condition that makes the guidance applicable. Express concrete elements as responsibility roles such as producer, consumer, constructor, local value, parser boundary, or state owner. Different project contexts may share one Fault Skill when they exhibit the same causal mechanism and benefit from the same investigation direction.
+
+Example abstraction:
+- Concrete case: a JSON conversion routine reads `comps` when some input-field combinations never initialize it.
+- Reusable title: `Local value read before assignment across conditional control flow`.
+- Reusable trigger: `A function raises NameError or UnboundLocalError because a local value is initialized only on some control-flow paths but is consumed on a path where initialization did not occur.`
+
+For create_new or rewrite_existing, return the complete Fault Skill. Rewrite must preserve the target fault_family and fault_subtype. Each case produces at most one update.
+
+Return JSON only:
+{
+  "case_summary":"string",
+  "skill_updates":{
+    "fault_skill":{
+      "decision":"create_new | rewrite_existing | preserve_existing | no_update",
+      "target_skill_id":"candidate id or null",
+      "rationale":"string",
+      "skill":{"fault_family":"fixed family id","fault_subtype":"snake_case subtype","title":"reusable causal mechanism","trigger":"observable failure and structural applicability condition","knowledge":["reusable investigation guidance"]} or null,
+      "no_update_reason":"string or null"
+    }
+  },
+  "no_update_reason":"string or null"
+}

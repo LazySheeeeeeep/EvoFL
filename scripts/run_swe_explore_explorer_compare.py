@@ -46,7 +46,7 @@ DEFAULT_OUTPUT_DIR = "runs/swe_explore_verified_10_compare_gpt5mini_jina_2026070
 DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
 SWE_EXPLORE_DATASET = "SWE-Explore-Bench/SWE-Explore-Bench"
 SWE_VERIFIED_DATASET = "princeton-nlp/SWE-bench_Verified"
-SKILL_TYPES = ("project_skill", "strategy_skill")
+SKILL_TYPES = ("project_skill", "fault_skill", "strategy_skill")
 ARM_NAMES = ("baseline_no_skill", "project_only", "strategy_only", "with_skill")
 
 

@@ -13,12 +13,14 @@ if str(SRC) not in sys.path:
 
 from evolutefl.config import load_config  # noqa: E402
 from evolutefl.skills import make_skill_bank  # noqa: E402
+from evolutefl.skills.fault_taxonomy import FAULT_FAMILIES  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect one staged SkillBank retrieval query.")
-    parser.add_argument("skill_type", choices=["project_skill", "strategy_skill"])
+    parser.add_argument("skill_type", choices=["project_skill", "fault_skill", "strategy_skill"])
     parser.add_argument("query")
+    parser.add_argument("--fault-family", choices=list(FAULT_FAMILIES))
     parser.add_argument("--config", default="runs/key77_gpt4omini_config_20260615.json")
     parser.add_argument("--retrieval-mode", choices=["lexical", "embedding", "hybrid"], default="embedding")
     parser.add_argument("--embedding-base-url", default="http://127.0.0.1:8008")
@@ -40,11 +42,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.embedding_cache_path:
         config["embedding"]["cache_path"] = args.embedding_cache_path
 
-    result = make_skill_bank(config).search_for_stage(
-        args.skill_type,
-        args.query,
-        limit=args.limit,
-    )
+    bank = make_skill_bank(config)
+    if args.skill_type == "fault_skill":
+        if not args.fault_family:
+            parser.error("--fault-family is required for fault_skill")
+        result = bank.fault_catalog(args.fault_family)
+    else:
+        result = bank.search_for_stage(args.skill_type, args.query, limit=args.limit)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

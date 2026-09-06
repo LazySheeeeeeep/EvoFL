@@ -5,6 +5,7 @@ from pathlib import Path
 
 from evolutefl.llm.client import FakeLLMClient
 from evolutefl.reflection import run_case_evolution
+from evolutefl.reflection.v3_evolution import _reflection_learning_signals
 from evolutefl.explorer import run_explorer
 from evolutefl.skills.bank import SkillBankV0
 
@@ -17,6 +18,14 @@ def _write_case(path: Path, *, staged: bool = True) -> None:
         events.extend([
             {"event": "project_skill_request", "step": 2, "query": "service state boundary"},
             {"event": "project_skill_loaded", "step": 2, "loaded_skill_id": None, "search_trace": {}},
+            {"event": "issue_revealed", "step": 2, "issue_payload": {"issue": "wrong state"}},
+            {"event": "fault_skill_request", "step": 3, "request": {
+                "fault_family": "state_assignment",
+                "fault_signature": "incorrect state reaches a reporter",
+                "project_context": "service state boundary",
+                "suspected_path": "state producer to reporter",
+            }},
+            {"event": "fault_skill_loaded", "step": 3, "loaded_skill_id": None, "search_trace": {}},
             {"event": "strategy_skill_request", "step": 4, "query": "producer reporter contrast"},
             {"event": "strategy_skill_loaded", "step": 4, "loaded_skill_id": None, "search_trace": {}},
         ])
@@ -38,6 +47,30 @@ def _config(skill_path: Path) -> dict:
 
 def _no_update() -> dict:
     return {"decision": "no_update", "target_skill_id": None, "rationale": "No lesson.", "skill": None, "no_update_reason": "No lesson."}
+
+
+def test_strategy_signal_detects_enclosing_symbol_granularity_mismatch() -> None:
+    signals = _reflection_learning_signals(
+        ["pkg/module.py::Formatter"],
+        ["pkg/module.py::Formatter.format_exception"],
+    )
+
+    strategy = signals["strategy_skill"]
+    assert strategy["label"] == "granularity_mismatch"
+    assert strategy["learning_scope"].startswith("candidate refinement")
+    assert strategy["granularity_matches"] == [{
+        "enclosing_candidate": "pkg/module.py::Formatter",
+        "ground_truth_function": "pkg/module.py::Formatter.format_exception",
+    }]
+
+
+def test_strategy_signal_does_not_treat_another_file_as_granularity_mismatch() -> None:
+    signals = _reflection_learning_signals(
+        ["other.py::Formatter"],
+        ["pkg/module.py::Formatter.format_exception"],
+    )
+
+    assert signals["strategy_skill"]["label"] == "not_applicable"
 
 
 def test_case_evolution_generates_queries_and_skill(tmpdir) -> None:
@@ -101,8 +134,13 @@ def test_v3_case_evolution_separates_project_builder_from_case_reflector(tmpdir)
         {"event": "project_skill_request", "step": 1, "request": {"project_type": "service"}},
         {"event": "project_skill_loaded", "step": 1, "loaded_skill_id": None},
         {"event": "issue_revealed", "step": 1, "issue_payload": {"issue": "wrong state"}},
-        {"event": "issue_skill_request", "step": 2, "request": {"issue_type": "wrong state"}},
-        {"event": "issue_skill_loaded", "step": 2, "loaded_skill_id": None},
+        {"event": "fault_skill_request", "step": 2, "request": {
+            "fault_family": "state_assignment",
+            "fault_signature": "reported state is incorrect",
+            "project_context": "service state boundary",
+            "suspected_path": "state producer through adapter",
+        }},
+        {"event": "fault_skill_loaded", "step": 2, "loaded_skill_id": None},
         {"event": "strategy_skill_request", "step": 3, "request": {}},
         {"event": "strategy_skill_loaded", "step": 3, "loaded_skill_id": None},
         {"event": "finish", "step": 4, "result": {"action": {"ranked_functions": ["wrong.py::report"]}}},
@@ -113,10 +151,10 @@ def test_v3_case_evolution_separates_project_builder_from_case_reflector(tmpdir)
     config = _config(skills)
     config["explorer"] = {"workflow_version": "v3"}
     fake = FakeLLMClient([
-        {"content": json.dumps({"decision": "preserve_existing", "reason": "orientation is insufficient"})},
-        {"content": json.dumps({"issue_skill_query": "incorrect state through adapter boundary", "strategy_diagnostic_context": "producer competes with reporter", "selected_strategy_skill_id": None, "strategy_selection_reason": "no catalog match"})},
-        {"content": json.dumps({"case_summary": "issue lesson", "skill_updates": {
-            "issue_skill": {"decision": "create_new", "target_skill_id": None, "rationale": "reusable path", "skill": {"value": "wrong_state_boundary", "title": "Wrong state boundary", "trigger": "Use when a reported state differs after an adapter boundary.", "knowledge": [{"text": "When reported state diverges, inspect the adaptation boundary that first changes its representation."}]}, "knowledge_edit": None, "no_update_reason": None},
+        {"content": json.dumps({"decision": "no_update", "reason": "orientation is insufficient", "repo_id": "demo/repo"})},
+        {"content": json.dumps({"fault_family": "state_assignment", "fault_subtype_query": "incorrect state through adapter boundary", "strategy_diagnostic_context": "producer competes with reporter", "selected_strategy_skill_id": None, "strategy_selection_reason": "no catalog match"})},
+        {"content": json.dumps({"case_summary": "fault lesson", "skill_updates": {
+            "fault_skill": {"decision": "create_new", "target_skill_id": None, "rationale": "reusable path", "skill": {"fault_family": "state_assignment", "fault_subtype": "wrong_state_boundary", "title": "Wrong state boundary", "trigger": "Use when a reported state differs after an adapter boundary.", "knowledge": ["When reported state diverges, inspect the adaptation boundary that first changes its representation."]}, "no_update_reason": None},
         }, "no_update_reason": None})},
         {"content": json.dumps({"case_summary": "ranking not applicable", "skill_updates": {
             "strategy_skill": _no_update(),
@@ -132,19 +170,154 @@ def test_v3_case_evolution_separates_project_builder_from_case_reflector(tmpdir)
     assert "wrong state" not in json.dumps(project_evidence)
     assert any(item.get("updated_skill_id") for item in summary["applied_updates"])
     records = [json.loads(line) for line in skills.read_text(encoding="utf-8").splitlines() if line]
-    assert [record["skill_type"] for record in records] == ["issue_skill"]
+    assert [record["skill_type"] for record in records] == ["fault_skill"]
     assert (case / "case_evolution" / "reflector_skill_search_context.json").exists()
-    assert (case / "case_evolution" / "issue_reflector_output.json").exists()
+    assert (case / "case_evolution" / "fault_reflector_output.json").exists()
     assert (case / "case_evolution" / "strategy_reflector_output.json").exists()
-    assert summary["learning_signals"]["issue_skill"]["label"] == "failure"
+    assert summary["learning_signals"]["fault_skill"]["label"] == "failure"
     assert summary["learning_signals"]["strategy_skill"]["label"] == "not_applicable"
-    issue_call_payload = json.loads(fake.calls[2]["messages"][1]["content"])
+    fault_call_payload = json.loads(fake.calls[2]["messages"][1]["content"])
     strategy_call_payload = json.loads(fake.calls[3]["messages"][1]["content"])
-    assert set(issue_call_payload["skill_search_context"]["candidates_by_skill_type"]) == {"issue_skill"}
+    assert set(fault_call_payload["skill_search_context"]["candidates_by_skill_type"]) == {"fault_skill"}
     assert set(strategy_call_payload["skill_search_context"]["candidates_by_skill_type"]) == {"strategy_skill"}
-    assert issue_call_payload["trajectory_evidence"]["reflection_scope"].startswith("Issue-guided")
+    assert fault_call_payload["trajectory_evidence"]["reflection_scope"].startswith("Fault-guided")
     assert strategy_call_payload["trajectory_evidence"]["reflection_scope"].startswith("Comparison")
     assert len(json.loads(skills.read_text(encoding="utf-8").splitlines()[0])) > 0
+
+
+def test_v3_fault_only_replay_skips_project_and_strategy_llm_calls(tmpdir) -> None:
+    root = Path(str(tmpdir))
+    case = root / "v3_fault_only"
+    case.mkdir()
+    (case / "result.json").write_text(json.dumps({
+        "instance_id": "v3_fault_only", "status": "completed",
+        "ranked_functions": ["wrong.py::report"],
+    }), encoding="utf-8")
+    events = [
+        {"event": "project_skill_request", "step": 1, "request": {"project_type": "service"}},
+        {"event": "project_skill_loaded", "step": 1, "loaded_skill_id": None},
+        {"event": "issue_revealed", "step": 1, "issue_payload": {"issue": "wrong state"}},
+        {"event": "fault_skill_request", "step": 2, "request": {
+            "fault_family": "state_assignment", "fault_signature": "state is not propagated",
+            "project_context": "producer and consumer", "suspected_path": "state propagation",
+        }},
+        {"event": "fault_skill_loaded", "step": 2, "loaded_skill_id": None},
+        {"event": "strategy_skill_request", "step": 3, "request": {}},
+        {"event": "strategy_skill_loaded", "step": 3, "loaded_skill_id": None},
+        {"event": "finish", "step": 4},
+    ]
+    (case / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events), encoding="utf-8"
+    )
+    skills = root / "skills.jsonl"
+    skills.write_text("", encoding="utf-8")
+    config = _config(skills)
+    config["explorer"] = {"workflow_version": "v3"}
+    fake = FakeLLMClient([
+        {"content": json.dumps({
+            "fault_family": "state_assignment",
+            "fault_subtype_query": "state update missing across a responsibility boundary",
+            "strategy_diagnostic_context": "producer competes with reporter",
+            "selected_strategy_skill_id": None,
+            "strategy_selection_reason": "no catalog match",
+        })},
+        {"content": json.dumps({"case_summary": "fault lesson", "skill_updates": {
+            "fault_skill": {
+                "decision": "create_new", "target_skill_id": None,
+                "rationale": "Reusable state propagation path.",
+                "skill": {
+                    "fault_family": "state_assignment",
+                    "fault_subtype": "state_propagation_boundary",
+                    "title": "State propagation boundary",
+                    "trigger": "A valid state update disappears across a responsibility boundary.",
+                    "knowledge": ["Trace the update through the first propagation boundary before ranking downstream reporters."],
+                },
+                "no_update_reason": None,
+            }
+        }, "no_update_reason": None})},
+    ])
+
+    summary = run_case_evolution(
+        case_run_dir=case, repo="demo/repo", issue="wrong state", config=config,
+        llm_client=fake, ground_truth_functions=["right.py::produce"],
+        ground_truth_patch="diff --git a/right.py b/right.py", fault_only=True,
+    )
+
+    assert summary["fault_only"] is True
+    assert summary["updated_skill_types"] == ["fault_skill"]
+    assert len(fake.calls) == 2
+    assert not (case / "case_evolution" / "project_knowledge_evidence.json").exists()
+    strategy_output = json.loads(
+        (case / "case_evolution" / "strategy_reflector_output.json").read_text(encoding="utf-8")
+    )
+    assert strategy_output["materialized_updates"] == []
+
+
+def test_v3_top5_hit_runs_success_fault_reflector(tmpdir) -> None:
+    root = Path(str(tmpdir))
+    case = root / "v3_success"
+    case.mkdir()
+    (case / "result.json").write_text(json.dumps({
+        "instance_id": "v3_success", "status": "completed",
+        "ranked_functions": ["right.py::produce"],
+    }), encoding="utf-8")
+    events = [
+        {"event": "project_skill_request", "step": 1, "request": {"project_type": "service"}},
+        {"event": "project_skill_loaded", "step": 1, "loaded_skill_id": None},
+        {"event": "issue_revealed", "step": 1, "issue_payload": {"issue": "wrong state"}},
+        {"event": "fault_skill_request", "step": 2, "request": {
+            "fault_family": "state_assignment", "fault_signature": "state is not propagated",
+            "project_context": "producer and consumer", "suspected_path": "state propagation",
+        }},
+        {"event": "fault_skill_loaded", "step": 2, "loaded_skill_id": None},
+        {"event": "strategy_skill_request", "step": 3, "request": {}},
+        {"event": "strategy_skill_loaded", "step": 3, "loaded_skill_id": None},
+        {"event": "finish", "step": 4},
+    ]
+    (case / "trajectory.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events), encoding="utf-8"
+    )
+    skills = root / "skills.jsonl"
+    skills.write_text("", encoding="utf-8")
+    config = _config(skills)
+    config["explorer"] = {"workflow_version": "v3"}
+    fake = FakeLLMClient([
+        {"content": json.dumps({"decision": "no_update", "reason": "orientation is insufficient", "repo_id": "demo/repo"})},
+        {"content": json.dumps({
+            "fault_family": "state_assignment",
+            "fault_subtype_query": "state update is not propagated across a responsibility boundary",
+            "strategy_diagnostic_context": "the producer is already ranked first",
+            "selected_strategy_skill_id": None,
+            "strategy_selection_reason": "no catalog match",
+        })},
+        {"content": json.dumps({"case_summary": "successful candidate path", "skill_updates": {
+            "fault_skill": {
+                "decision": "create_new", "target_skill_id": None,
+                "rationale": "The successful path is reusable.",
+                "skill": {
+                    "fault_family": "state_assignment", "fault_subtype": "state_propagation_boundary",
+                    "title": "State propagation boundary",
+                    "trigger": "A state update is visible at its producer but absent at a downstream responsibility boundary.",
+                    "knowledge": ["Trace the update through the first propagation boundary before inspecting downstream reporters."],
+                },
+                "no_update_reason": None,
+            }
+        }, "no_update_reason": None})},
+        {"content": json.dumps({"case_summary": "ranking already correct", "skill_updates": {
+            "strategy_skill": _no_update(),
+        }, "no_update_reason": "No corrective ranking lesson."})},
+    ])
+
+    summary = run_case_evolution(
+        case_run_dir=case, repo="demo/repo", issue="wrong state", config=config,
+        llm_client=fake, ground_truth_functions=["right.py::produce"],
+        ground_truth_patch="diff --git a/right.py b/right.py",
+    )
+
+    assert summary["eligible"] is True
+    assert summary["learning_signals"]["fault_skill"]["label"] == "success"
+    assert summary["updated_skill_types"] == ["fault_skill"]
+    assert len(summary["materialized_updates"]) == 1
 
 
 def test_old_trajectory_is_rejected(tmpdir) -> None:

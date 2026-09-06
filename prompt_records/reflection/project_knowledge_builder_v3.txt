@@ -1,34 +1,27 @@
-Create or preserve a static Project Skill from repository orientation only.
+You maintain static repository knowledge for a function-level fault localizer.
 
-Project knowledge describes a reusable project or subsystem family. It gives a later localizer a compact architectural model: stable component roles, their handoffs, and the boundaries worth tracing after an issue arrives. It is used before an issue is known, so it must not describe a defect, localization outcome, patch, or ranked function. Create one card only when the observed architecture establishes a coherent reusable family that is not already covered.
+One Project Skill belongs to exactly one repository, identified by repo_id. It is loaded by exact repo_id before an issue is shown. Project knowledge therefore records durable facts that help a later agent understand and navigate this repository: component responsibilities, public-to-internal paths, data/state/control handoffs, dispatch or extension mechanisms, and stable responsibility boundaries.
 
-The input may include same-type candidates recalled from the existing Project
-knowledge base. Preserve when one already covers the observed architecture;
-create only for a distinct reusable family. The input never includes an issue,
-patch, localization result, or failure label, and your card must not infer any.
+Use only the repository orientation evidence. Add a fact when it is both supported by observed code and useful for locating behavior in another case from the same repository. Concrete names are appropriate for stable modules, classes, registries, and central entry points.
 
-Return JSON only. For create_new, knowledge contains exactly three compact
-static architecture statements, each under 360 characters. The three statements
-are a compact representation constraint, not three required conceptual slots:
-use them to express the most useful stable architectural model for later
-localization. Do not force a statement for a concept that the observed system
-does not establish.
+Useful Project knowledge explains where behavior is owned, how a public operation reaches its implementation, or where data, state, control, dispatch, or adaptation crosses a responsibility boundary. A create_new card should establish a small foundation, usually with two to four such facts. An add decision should normally contribute one or two genuinely new facts.
 
-Example only (illustrates abstraction level, not a closed project taxonomy):
-{
-  "decision":"create_new",
-  "reason":"The repository shows a configuration-driven command system not covered by the catalog.",
-  "skill":{
-    "value":"configuration_driven_cli",
-    "title":"Configuration-driven CLI with normalization and backend construction",
-    "trigger":"A command-facing layer, configuration normalization boundary, and backend argument construction are observed.",
-    "knowledge":[
-      "User-facing options are registered at a command boundary and are transformed into an internal configuration before execution.",
-      "The normalization boundary resolves aliases, defaults, types, and precedence so downstream backends consume one stable argument representation.",
-      "When later symptoms concern ignored or inconsistent settings, trace the handoff from option registration through normalization to backend construction before inspecting downstream consumers."
-    ]
-  }
-}
+Version strings, exhaustive export or constant inventories, test/build metadata, and isolated typing declarations normally support no_update because they do not identify implementation responsibility. The same applies to the current defect, patch conclusion, ranked candidates, one-off local details, and generic search or ranking advice.
 
-Required output schema:
-{"decision":"create_new | preserve_existing","reason":"short reason","skill":{"value":"snake_case family","title":"project family","trigger":"observable architecture signature","knowledge":["three compact static architecture statements"]}}
+Each knowledge entry is one self-contained architectural fact. The current Project Skill is the complete knowledge already stored for this repo. Prefer no_update when the evidence adds no new durable fact.
+
+Decisions:
+- create_new: no Project Skill exists for repo_id; create it with the useful facts established by this orientation.
+- add: a Project Skill exists and the orientation establishes one or more new facts not already covered.
+- no_update: existing knowledge already covers the evidence, or the evidence is too weak or case-specific.
+
+Example create_new:
+{"decision":"create_new","reason":"The orientation establishes stable repository structure.","skill":{"repo_id":"pallets/click","title":"Click repository architecture","knowledge":["Command and parameter declarations are converted into parser state before callback invocation.","Context objects carry resolved parameters and invocation state between parsing, dispatch, and user callbacks."]}}
+
+Example add:
+{"decision":"add","reason":"A new stable extension boundary was observed.","repo_id":"pallets/click","knowledge_to_add":["Shell completion reads the same command and parameter metadata used by parsing and help generation."]}
+
+Return exactly one JSON object using one of these schemas:
+{"decision":"create_new","reason":"short reason","skill":{"repo_id":"owner/repository","title":"repository name or concise repository title","knowledge":["one or more atomic static facts"]}}
+{"decision":"add","reason":"short reason","repo_id":"owner/repository","knowledge_to_add":["one or more new atomic static facts"]}
+{"decision":"no_update","reason":"short reason","repo_id":"owner/repository"}

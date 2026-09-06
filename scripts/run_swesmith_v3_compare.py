@@ -1,4 +1,4 @@
-"""Paired no-skill vs V3-Skill Explorer comparison for SWE-smith cases.
+"""Paired no-Fault vs with-Fault Explorer comparison for SWE-smith cases.
 
 Run this script inside WSL after selecting a held-out case manifest.  It never
 updates the supplied trained SkillBank: both arms pass ``--skip-evolution``.
@@ -15,8 +15,8 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARM_NAMES = ("no_issue_skill", "with_issue_skill")
-SKILL_TYPES = ("project_skill", "issue_skill", "strategy_skill")
+ARM_NAMES = ("no_fault", "with_fault")
+SKILL_TYPES = ("project_skill", "fault_skill", "strategy_skill")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -98,8 +98,8 @@ def _runner_command(args: argparse.Namespace, arm_dir: Path, arm: str, *, resume
         "--enable-embedding", "--retrieval-mode", "embedding",
         "--embedding-base-url", "http://127.0.0.1:8008",
     ])
-    if arm == "no_issue_skill":
-        command.extend(["--disable-skill-type", "issue_skill"])
+    if arm == "no_fault":
+        command.extend(["--disable-skill-type", "fault_skill"])
     if resume:
         command.append("--resume")
     return command
@@ -125,7 +125,7 @@ def _run_arm_with_recovery(args: argparse.Namespace, arm_dir: Path, arm: str, ex
 
 
 def _require_v3_workflow(config_path: Path) -> None:
-    """Reject legacy configs before an experiment silently skips Issue Skill."""
+    """Reject legacy configs before an experiment silently skips Fault Skill."""
     path = config_path if config_path.is_absolute() else ROOT / config_path
     try:
         config = json.loads(path.read_text(encoding="utf-8"))
@@ -148,31 +148,31 @@ def _build_report(
         arm: _arm_metrics(out_dir / arm, summary)
         for arm, summary in arm_summaries.items()
     }
-    baseline = arm_metrics["no_issue_skill"]
-    full = arm_metrics["with_issue_skill"]
+    baseline = arm_metrics["no_fault"]
+    full = arm_metrics["with_fault"]
     paired = _paired_rank_changes(
-        arm_summaries["no_issue_skill"].get("cases", []),
-        arm_summaries["with_issue_skill"].get("cases", []),
-        baseline_dir=out_dir / "no_issue_skill",
-        with_issue_dir=out_dir / "with_issue_skill",
+        arm_summaries["no_fault"].get("cases", []),
+        arm_summaries["with_fault"].get("cases", []),
+        baseline_dir=out_dir / "no_fault",
+        with_fault_dir=out_dir / "with_fault",
     )
     return {
         "selected_instance_ids": [str(case.get("instance_id")) for case in selected],
-        "same_case_manifest": _case_ids(arm_summaries["no_issue_skill"]) == _case_ids(arm_summaries["with_issue_skill"]),
+        "same_case_manifest": _case_ids(arm_summaries["no_fault"]) == _case_ids(arm_summaries["with_fault"]),
         "arms": arm_metrics,
-        "delta_with_issue_skill_minus_no_issue_skill": {
+        "delta_with_fault_minus_no_fault": {
             metric: full["function_metrics"].get(metric, 0.0) - baseline["function_metrics"].get(metric, 0.0)
             for metric in ("top1", "top3", "top5", "mrr")
         } | {
             "completed_count": full["completed_count"] - baseline["completed_count"],
             "forced_finish_count": full["forced_finish_count"] - baseline["forced_finish_count"],
         },
-        "tool_call_delta_with_issue_skill_minus_no_issue_skill": _counter_delta(
+        "tool_call_delta_with_fault_minus_no_fault": _counter_delta(
             baseline["tool_calls"], full["tool_calls"],
         ),
-        "issue_skill_diagnostics": {
-            "no_issue_skill": baseline["issue_skill_diagnostics"],
-            "with_issue_skill": full["issue_skill_diagnostics"],
+        "fault_skill_diagnostics": {
+            "no_fault": baseline["fault_skill_diagnostics"],
+            "with_fault": full["fault_skill_diagnostics"],
         },
         "candidate_and_rank_changes": paired,
     }
@@ -183,7 +183,7 @@ def _arm_metrics(arm_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
     cases = summary.get("cases") or []
     stage = {kind: Counter() for kind in SKILL_TYPES}
     tool_calls: Counter[str] = Counter()
-    issue_rows: list[dict[str, Any]] = []
+    fault_rows: list[dict[str, Any]] = []
     forced = 0
     for case in cases:
         case_dir = arm_dir / "cases" / str(case.get("instance_id") or "")
@@ -200,7 +200,11 @@ def _arm_metrics(arm_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
                 elif event.get("event") == f"{kind}_loaded":
                     stage[kind]["loaded"] += int(bool(event.get("loaded_skill_id")))
                     trace = event.get("search_trace") or {}
-                    if trace.get("candidate_selected_skill_ids") or trace.get("candidate_skill_ids"):
+                    if (
+                        trace.get("catalog_skill_ids")
+                        or trace.get("candidate_selected_skill_ids")
+                        or trace.get("candidate_skill_ids")
+                    ):
                         stage[kind]["recalled"] += 1
                     selector = trace.get("selector") or {}
                     selected = selector.get("selected_skill_id") not in {None, "", "none", "null"}
@@ -209,20 +213,38 @@ def _arm_metrics(arm_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
                     validator = trace.get("validator") or {}
                     if validator.get("applicable") or validator.get("approved"):
                         stage[kind]["validated"] += 1
-        issue_rows.append(_issue_diagnostic_row(str(case.get("instance_id") or ""), events))
+        fault_rows.append(_fault_diagnostic_row(str(case.get("instance_id") or ""), events))
     return {
         "completed_count": int(report.get("completed_count") or 0),
         "forced_finish_count": forced,
         "function_metrics": report.get("function_metrics") or {},
         "skill_stages": {kind: dict(counts) for kind, counts in stage.items()},
-        "issue_skill_diagnostics": {
-            "counts": dict(stage["issue_skill"]),
-            "primary_blocker": _primary_issue_blocker(issue_rows),
-            "per_case": issue_rows,
+        "fault_skill_diagnostics": {
+            "counts": dict(stage["fault_skill"]),
+            "rates": {
+                "catalog_nonempty_rate": _safe_rate(
+                    stage["fault_skill"]["recalled"], stage["fault_skill"]["attempted"]
+                ),
+                "selector_pass_rate": _safe_rate(
+                    stage["fault_skill"]["selected"], stage["fault_skill"]["recalled"]
+                ),
+                "validator_pass_rate": _safe_rate(
+                    stage["fault_skill"]["validated"], stage["fault_skill"]["selected"]
+                ),
+                "load_rate": _safe_rate(
+                    stage["fault_skill"]["loaded"], stage["fault_skill"]["attempted"]
+                ),
+            },
+            "primary_blocker": _primary_fault_blocker(fault_rows),
+            "per_case": fault_rows,
         },
         "tool_calls": dict(tool_calls),
         "active_skill_count": report.get("active_skill_count"),
     }
+
+
+def _safe_rate(numerator: int, denominator: int) -> float:
+    return float(numerator) / float(denominator) if denominator else 0.0
 
 
 def _paired_rank_changes(
@@ -230,7 +252,7 @@ def _paired_rank_changes(
     full_cases: list[dict[str, Any]],
     *,
     baseline_dir: Path,
-    with_issue_dir: Path,
+    with_fault_dir: Path,
 ) -> list[dict[str, Any]]:
     baseline = {str(case.get("instance_id")): case for case in baseline_cases}
     rows: list[dict[str, Any]] = []
@@ -242,16 +264,16 @@ def _paired_rank_changes(
         before_metrics = before.get("function_metrics") or {}
         after_metrics = case.get("function_metrics") or {}
         before_trace = _read_jsonl(baseline_dir / "cases" / instance_id / "trajectory.jsonl")
-        after_trace = _read_jsonl(with_issue_dir / "cases" / instance_id / "trajectory.jsonl")
+        after_trace = _read_jsonl(with_fault_dir / "cases" / instance_id / "trajectory.jsonl")
         rows.append({
             "instance_id": instance_id,
             "ranked_functions_changed": before_ranked != after_ranked,
             "baseline_ranked_functions": before_ranked,
-            "with_issue_skill_ranked_functions": after_ranked,
-            "issue_skill_loaded_id": _loaded_skill_id(after_trace, "issue_skill"),
+            "with_fault_skill_ranked_functions": after_ranked,
+            "fault_skill_loaded_id": _loaded_skill_id(after_trace, "fault_skill"),
             "baseline_tool_calls": _tool_calls_for_events(before_trace),
-            "with_issue_skill_tool_calls": _tool_calls_for_events(after_trace),
-            "tool_call_delta_with_issue_skill_minus_baseline": _counter_delta(
+            "with_fault_skill_tool_calls": _tool_calls_for_events(after_trace),
+            "tool_call_delta_with_fault_skill_minus_baseline": _counter_delta(
                 _tool_calls_for_events(before_trace), _tool_calls_for_events(after_trace),
             ),
             "top1_effect": _metric_effect(before_metrics, after_metrics, "top1"),
@@ -263,16 +285,22 @@ def _paired_rank_changes(
     return rows
 
 
-def _issue_diagnostic_row(instance_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
-    request = next((event for event in events if event.get("event") == "issue_skill_request"), {})
-    loaded = next((event for event in events if event.get("event") == "issue_skill_loaded"), {})
+def _fault_diagnostic_row(instance_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+    request = next((event for event in events if event.get("event") == "fault_skill_request"), {})
+    loaded = next((event for event in events if event.get("event") == "fault_skill_loaded"), {})
     trace = loaded.get("search_trace") or {}
     selector = trace.get("selector") or {}
     validator = trace.get("validator") or {}
-    recalled_ids = list(trace.get("candidate_selected_skill_ids") or trace.get("candidate_skill_ids") or [])
+    recalled_ids = list(
+        trace.get("catalog_skill_ids")
+        or trace.get("candidate_selected_skill_ids")
+        or trace.get("candidate_skill_ids")
+        or []
+    )
     return {
         "instance_id": instance_id,
         "attempted": bool(request),
+        "fault_family": loaded.get("fault_family") or (request.get("request") or {}).get("fault_family"),
         "recalled": bool(recalled_ids),
         "candidate_skill_ids": recalled_ids,
         "candidate_scores": trace.get("scores") or {},
@@ -285,21 +313,21 @@ def _issue_diagnostic_row(instance_id: str, events: list[dict[str, Any]]) -> dic
     }
 
 
-def _primary_issue_blocker(rows: list[dict[str, Any]]) -> str:
+def _primary_fault_blocker(rows: list[dict[str, Any]]) -> str:
     attempted = [row for row in rows if row["attempted"]]
     if not attempted:
-        return "Issue stage was never attempted."
-    if all("Issue Skill loading disabled." in row.get("notes", []) for row in attempted):
-        return "Issue Skill loading was intentionally disabled for this baseline arm."
+        return "Fault stage was never attempted."
+    if all("Fault Skill loading disabled." in row.get("notes", []) for row in attempted):
+        return "Fault Skill loading was intentionally disabled for this baseline arm."
     if not any(row["recalled"] for row in attempted):
-        return "Embedding recall produced no threshold-qualified Issue Skill candidates."
+        return "No fine-grained Fault Skill existed in the classified family."
     if not any(row.get("selector_selected_skill_id") for row in attempted):
-        return "The selector rejected all recalled Issue Skill candidates."
+        return "The selector rejected all same-family Fault Skill candidates."
     if not any(row["validator_applicable"] for row in attempted):
-        return "The validator rejected every selector-approved Issue Skill candidate."
+        return "The validator rejected every selector-approved Fault Skill candidate."
     if not any(row.get("loaded_skill_id") for row in attempted):
-        return "No Issue Skill was injected after validation."
-    return "At least one Issue Skill was injected; inspect paired rank effects for usefulness."
+        return "No Fault Skill was injected after validation."
+    return "At least one Fault Skill was injected; inspect paired rank effects for usefulness."
 
 
 def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:

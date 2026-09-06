@@ -1,0 +1,6 @@
+Select at most one existing Fault Skill as the possible update target for a completed case.
+
+All supplied candidates belong to the already classified fault family and contain only subtype, title, and trigger. Select a candidate when the completed case has the same causal failure mechanism and a compatible source-investigation direction. Repository domains, APIs, data types, and concrete symbols may differ. A shared top-level family is not sufficient. Return null when the case represents a distinct mechanism-level subtype.
+
+Return JSON only:
+{"selected_skill_id":"candidate id or null","reason":"short reason"}

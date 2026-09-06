@@ -16,13 +16,17 @@ from .embedding_store import (
     select_embedding_skills,
 )
 from .retrieval import DEFAULT_SKILL_TYPE_QUOTA, select_skills
+from .fault_taxonomy import validate_fault_family
 from .schema import (
     SKILL_TYPES,
     DimensionSkill,
     UnsupportedLegacySkillError,
+    normalize_repo_id,
     slugify,
     validate_atomic_knowledge,
-    validate_issue_knowledge,
+    validate_fault_knowledge,
+    validate_project_add,
+    validate_project_create,
 )
 
 
@@ -43,10 +47,8 @@ class SkillBankV0:
         embedding_document_task: str = "retrieval.passage",
         embedding_min_score: float = DEFAULT_EMBEDDING_MIN_SCORE,
         project_skill_embedding_min_score: float | None = None,
-        issue_skill_embedding_min_score: float | None = None,
         strategy_skill_embedding_min_score: float | None = None,
         project_skill_candidate_min_score: float = 0.0,
-        issue_skill_candidate_min_score: float = 0.0,
         evolution_candidate_min_score: float = 0.25,
         embedding_fallback_to_lexical: bool = False,
         embedding_batch_size: int = 16,
@@ -75,11 +77,6 @@ class SkillBankV0:
                 if project_skill_embedding_min_score is None
                 else project_skill_embedding_min_score
             ),
-            "issue_skill": float(
-                embedding_min_score
-                if issue_skill_embedding_min_score is None
-                else issue_skill_embedding_min_score
-            ),
             "strategy_skill": float(
                 embedding_min_score
                 if strategy_skill_embedding_min_score is None
@@ -88,7 +85,6 @@ class SkillBankV0:
         }
         self.evolution_candidate_min_score = float(evolution_candidate_min_score)
         self.project_skill_candidate_min_score = float(project_skill_candidate_min_score)
-        self.issue_skill_candidate_min_score = float(issue_skill_candidate_min_score)
         requested_types = enabled_skill_types or SKILL_TYPES
         self.enabled_skill_types = {
             _valid_skill_type(skill_type) for skill_type in requested_types
@@ -118,16 +114,145 @@ class SkillBankV0:
         # A card's semantic identity is its type plus its stable value. Older
         # experimental banks may contain duplicate IDs for the same center;
         # expose only the newest one so retrieval and embedding stay unbiased.
-        latest: dict[tuple[str, str], DimensionSkill] = {}
-        order: list[tuple[str, str]] = []
+        latest: dict[tuple[str, ...], DimensionSkill] = {}
+        order: list[tuple[str, ...]] = []
         for skill in active:
-            identity = (skill.skill_type, skill.value)
+            identity = (
+                (skill.skill_type, str(skill.fault_family), skill.value)
+                if skill.skill_type == "fault_skill"
+                else (skill.skill_type, skill.repo_id)
+                if skill.skill_type == "project_skill" and skill.repo_id
+                else (skill.skill_type, skill.value)
+            )
             current = latest.get(identity)
             if current is None:
                 order.append(identity)
             if current is None or skill.version >= current.version:
                 latest[identity] = skill
         return [latest[identity] for identity in order]
+
+    def get_project_skill(self, repo_id: str) -> dict[str, Any] | None:
+        """Load Project knowledge by exact repository identity."""
+
+        normalized = normalize_repo_id(repo_id)
+        match = next(
+            (
+                skill
+                for skill in self.active_skills()
+                if skill.skill_type == "project_skill" and skill.repo_id == normalized
+            ),
+            None,
+        )
+        return match.compact_dict() if match is not None else None
+
+    def search_project_for_repo(self, repo_id: str) -> dict[str, Any]:
+        """Return at most one exact Project Skill without semantic retrieval."""
+
+        normalized = normalize_repo_id(repo_id)
+        matched = self.get_project_skill(normalized)
+        selected = [matched["skill_id"]] if matched else []
+        return {
+            "matched_skills": [matched] if matched else [],
+            "skill_search_trace": {
+                "retrieval_mode": "exact_repo_id_v1",
+                "repo_id": normalized,
+                "candidate_skill_ids": selected,
+                "selected_skill_ids": selected,
+                "notes": [
+                    "Project Skill identity is the normalized owner/repository name."
+                ],
+            },
+        }
+
+    def apply_project_update(self, update: dict[str, Any]) -> dict[str, Any]:
+        """Apply the Project-only create/add/no_update protocol."""
+
+        decision = str(update.get("decision") or "").strip()
+        repo_id = normalize_repo_id(update.get("repo_id"))
+        if decision == "no_update":
+            return {
+                "action": "no_update",
+                "repo_id": repo_id,
+                "updated_skill_id": None,
+            }
+        existing = next(
+            (
+                skill
+                for skill in self.active_skills()
+                if skill.skill_type == "project_skill" and skill.repo_id == repo_id
+            ),
+            None,
+        )
+        if decision == "create_new":
+            if existing is not None:
+                return {
+                    "action": "preserve_existing_project",
+                    "repo_id": repo_id,
+                    "updated_skill_id": existing.skill_id,
+                    "version": existing.version,
+                }
+            card = validate_project_create(update.get("skill"), expected_repo_id=repo_id)
+            records = self.load()
+            skill = DimensionSkill(
+                skill_id=_unique_skill_id(records, f"project_skill_{slugify(repo_id)}"),
+                status="active",
+                version=1,
+                skill_type="project_skill",
+                value=repo_id,
+                repo_id=repo_id,
+                title=card["title"],
+                trigger="",
+                knowledge=card["knowledge"],
+            )
+            raw_records = read_jsonl(self.path)
+            raw_records.append(skill.to_dict())
+            write_jsonl(self.path, raw_records)
+            return {
+                "action": "create_new",
+                "repo_id": repo_id,
+                "updated_skill_id": skill.skill_id,
+                "version": 1,
+                "embedding_cache": {"enabled": False, "reason": "exact repo lookup"},
+            }
+        if decision != "add":
+            raise ValueError(f"Unsupported Project Skill decision: {decision!r}.")
+        if existing is None:
+            raise ValueError(f"Cannot add Project knowledge before creating repo_id={repo_id!r}.")
+        additions = validate_project_add(update.get("knowledge_to_add"))
+        novel = [item for item in additions if item not in existing.knowledge_texts]
+        if not novel:
+            return {
+                "action": "no_update",
+                "repo_id": repo_id,
+                "updated_skill_id": existing.skill_id,
+                "version": existing.version,
+                "reason": "All proposed Project knowledge already exists.",
+            }
+        superseded = deepcopy(existing)
+        superseded.status = "superseded"
+        updated = DimensionSkill(
+            skill_id=existing.skill_id,
+            status="active",
+            version=existing.version + 1,
+            skill_type="project_skill",
+            value=repo_id,
+            repo_id=repo_id,
+            title=existing.title,
+            trigger="",
+            knowledge=[*existing.knowledge_texts, *novel],
+        )
+        raw_records = read_jsonl(self.path)
+        raw_records.extend([superseded.to_dict(), updated.to_dict()])
+        write_jsonl(self.path, raw_records)
+        return {
+            "action": "add_project_knowledge",
+            "repo_id": repo_id,
+            "updated_skill_id": updated.skill_id,
+            "version": updated.version,
+            "added_count": len(novel),
+            "knowledge_added": novel,
+            "embedding_cache": {"enabled": False, "reason": "exact repo lookup"},
+        }
 
     def strategy_catalog(self) -> list[dict[str, Any]]:
         """Return the compact applicability catalog shown to an LLM selector."""
@@ -191,6 +316,10 @@ class SkillBankV0:
 
     def search_for_stage(self, skill_type: str, query: str, *, limit: int = 1) -> dict[str, Any]:
         skill_type = _valid_skill_type(skill_type)
+        if skill_type == "fault_skill":
+            raise ValueError(
+                "Fault Skills use fault_catalog(fault_family); they are not embedding-retrieved."
+            )
         if skill_type == "strategy_skill":
             raise ValueError(
                 "Strategy Skills are selected from strategy_catalog(); use select_strategy_skill()."
@@ -261,39 +390,36 @@ class SkillBankV0:
             "skill_search_trace": trace,
         }
 
-    def search_issue_candidates(self, query: str, *, limit: int = 5) -> dict[str, Any]:
-        """Recall Issue candidates before the Issue selector and validator.
+    def fault_catalog(self, fault_family: str) -> dict[str, Any]:
+        """Return the complete compact catalog for one fixed Fault family."""
 
-        Runtime similarity must not decide applicability by itself. It only
-        provides a bounded semantic neighborhood; the selector compares compact
-        title/trigger cards and the validator decides whether knowledge is safe
-        to inject for the current issue and observed repository boundary.
-        """
-        query = str(query or "").strip()
-        if not query:
-            raise ValueError("Issue Skill candidate query must be non-empty.")
-        limit = max(1, int(limit))
-        active = [skill for skill in self.active_skills() if skill.skill_type == "issue_skill"]
-        selected, trace = self._select_issue_candidates(
-            query,
-            active,
-            max_matched_skills=limit,
-            max_per_skill_type={"issue_skill": limit},
+        family = validate_fault_family(fault_family)
+        active = sorted(
+            (
+                skill
+                for skill in self.active_skills()
+                if skill.skill_type == "fault_skill" and skill.fault_family == family
+            ),
+            key=lambda skill: (skill.title.lower(), skill.skill_id),
         )
-        trace["requested_skill_type"] = "issue_skill"
-        trace["candidate_limit"] = limit
+        candidates = [
+            {
+                "skill_id": skill.skill_id,
+                "fault_subtype": skill.fault_subtype,
+                "title": skill.title,
+                "trigger": skill.trigger,
+            }
+            for skill in active
+        ]
         return {
-            "candidate_skills": [
-                {
-                    "skill_id": skill.skill_id,
-                    "value": skill.value,
-                    "title": skill.title,
-                    "trigger": skill.trigger,
-                    "retrieval_score": (trace.get("scores") or {}).get(skill.skill_id),
-                }
-                for skill in selected
-            ],
-            "skill_search_trace": trace,
+            "fault_family": family,
+            "candidate_skills": candidates,
+            "skill_search_trace": {
+                "retrieval_mode": "llm_full_family_catalog_v1",
+                "fault_family": family,
+                "catalog_skill_ids": [item["skill_id"] for item in candidates],
+                "catalog_count": len(candidates),
+            },
         }
 
     def get_active_skill(self, skill_id: str, *, skill_type: str | None = None) -> dict[str, Any] | None:
@@ -444,7 +570,10 @@ class SkillBankV0:
     def rebuild_embeddings(self) -> dict[str, Any]:
         if self.embedding_client is None:
             raise RuntimeError("Embedding client is not configured.")
-        active = self.active_skills()
+        active = [
+            skill for skill in self.active_skills()
+            if skill.skill_type == "project_skill"
+        ]
         store = SkillEmbeddingStore(self.embedding_config.cache_path, model_id=self.embedding_config.model_id)
         _, trace = store.ensure_skill_embeddings(
             active,
@@ -453,7 +582,11 @@ class SkillBankV0:
             batch_size=self.embedding_config.batch_size,
             prune_to_skills=True,
         )
-        return {"skill_bank_path": str(self.path), "active_skill_count": len(active), "embedding_cache": trace}
+        return {
+            "skill_bank_path": str(self.path),
+            "embedded_project_skill_count": len(active),
+            "embedding_cache": trace,
+        }
 
     def _select_for_query(
         self,
@@ -559,47 +692,6 @@ class SkillBankV0:
         except Exception as exc:  # noqa: BLE001 - an empty candidate set is safe.
             return [], _failed_trace(query, f"Project candidate retrieval failed: {exc}")
 
-    def _select_issue_candidates(
-        self,
-        query: str,
-        active: list[DimensionSkill],
-        *,
-        max_matched_skills: int,
-        max_per_skill_type: dict[str, int],
-    ) -> tuple[list[DimensionSkill], dict[str, Any]]:
-        """Recall a bounded Issue neighborhood for semantic applicability gates."""
-
-        if self.retrieval_mode == "lexical":
-            return self._select_lexical(query, active, max_matched_skills, max_per_skill_type)
-        if self.embedding_client is None:
-            return self._select_for_query(
-                query,
-                active,
-                max_matched_skills=max_matched_skills,
-                max_per_skill_type=max_per_skill_type,
-                skill_type="issue_skill",
-            )
-        try:
-            config = replace(
-                self.embedding_config,
-                min_score=self.issue_skill_candidate_min_score,
-            )
-            selected, trace = select_embedding_skills(
-                query_text=query,
-                skills=active,
-                client=self.embedding_client,
-                config=config,
-                max_matched_skills=max_matched_skills,
-                max_per_skill_type=max_per_skill_type,
-            )
-            trace["retrieval_mode"] = "embedding_issue_candidate_recall_v1"
-            trace.setdefault("notes", []).append(
-                f"issue_skill_candidate_min_score={self.issue_skill_candidate_min_score}"
-            )
-            return selected, trace
-        except Exception as exc:  # noqa: BLE001 - an empty candidate set is safe.
-            return [], _failed_trace(query, f"Issue candidate retrieval failed: {exc}")
-
     def _select_lexical(
         self,
         query: str,
@@ -657,35 +749,44 @@ class SkillBankV0:
     def search_for_v3_evolution(
         self,
         *,
-        issue_skill_query: str,
+        fault_family: str,
+        selected_fault_skill_id: str | None,
         selected_strategy_skill_id: str | None,
         strategy_diagnostic_context: str,
         limit_per_type: int = 5,
     ) -> dict[str, Any]:
-        """Recall Issue and Strategy candidates independently of runtime loading."""
+        """Resolve one Fault target and recall Strategy candidates independently."""
         active = {skill.skill_id: skill for skill in self.active_skills()}
         limit = max(1, int(limit_per_type))
-        by_type: dict[str, list[dict[str, Any]]] = {}
-        traces: dict[str, dict[str, Any]] = {}
-        for skill_type, query in (
-            ("issue_skill", str(issue_skill_query or "")),
-            ("strategy_skill", str(strategy_diagnostic_context or "")),
+        family = validate_fault_family(fault_family)
+        selected_fault_id = str(selected_fault_skill_id or "").strip()
+        selected_fault = active.get(selected_fault_id)
+        fault_candidates: list[dict[str, Any]] = []
+        if (
+            selected_fault is not None
+            and selected_fault.skill_type == "fault_skill"
+            and selected_fault.fault_family == family
         ):
-            selected, trace = self._select_for_evolution(
-                query,
-                [skill for skill in active.values() if skill.skill_type == skill_type],
-                max_matched_skills=limit,
-                max_per_skill_type={skill_type: limit},
-            )
-            scores = trace.get("scores") or {}
-            by_type[skill_type] = [
-                {
-                    **skill.compact_dict(include_knowledge_ids=(skill_type == "issue_skill")),
-                    "retrieval_score": scores.get(skill.skill_id),
-                }
-                for skill in selected[:limit]
-            ]
-            traces[skill_type] = trace
+            fault_candidates.append(selected_fault.compact_dict())
+        by_type: dict[str, list[dict[str, Any]]] = {"fault_skill": fault_candidates}
+        traces: dict[str, dict[str, Any]] = {}
+        traces["fault_skill"] = {
+            "retrieval_mode": "llm_full_family_catalog_target_v1",
+            "fault_family": family,
+            "selected_skill_ids": [item["skill_id"] for item in fault_candidates],
+        }
+        selected, trace = self._select_for_evolution(
+            str(strategy_diagnostic_context or ""),
+            [skill for skill in active.values() if skill.skill_type == "strategy_skill"],
+            max_matched_skills=limit,
+            max_per_skill_type={"strategy_skill": limit},
+        )
+        scores = trace.get("scores") or {}
+        by_type["strategy_skill"] = [
+            {**skill.compact_dict(), "retrieval_score": scores.get(skill.skill_id)}
+            for skill in selected[:limit]
+        ]
+        traces["strategy_skill"] = trace
         selected_id = str(selected_strategy_skill_id or "").strip()
         selected = active.get(selected_id)
         if selected and selected.skill_type == "strategy_skill" and not any(
@@ -693,7 +794,7 @@ class SkillBankV0:
         ):
             by_type["strategy_skill"].append({**selected.compact_dict(), "candidate_source": "runtime_catalog_selection"})
         return {
-            "queries": {"issue_skill": issue_skill_query, "strategy_skill": strategy_diagnostic_context},
+            "queries": {"fault_skill": family, "strategy_skill": strategy_diagnostic_context},
             "candidates_by_skill_type": by_type,
             "candidate_target_skills": [item for cards in by_type.values() for item in cards],
             "search_traces": traces,
@@ -712,16 +813,13 @@ class SkillBankV0:
 
     def _apply_create(self, update: dict[str, Any]) -> dict[str, Any]:
         skill_type = _valid_skill_type(update.get("skill_type"))
-        if skill_type == "issue_skill" and update.get("knowledge_edit") is not None:
-            card = _apply_issue_knowledge_edit(old, update["knowledge_edit"])
-        else:
-            card = _valid_complete_skill(update.get("skill"), skill_type)
+        card = _valid_complete_skill(update.get("skill"), skill_type)
         existing = self.load()
         duplicate = next(
             (
                 skill
                 for skill in self.active_skills()
-                if skill.skill_type == skill_type and skill.value == card["value"]
+                if _skill_identity(skill) == _card_identity(skill_type, card)
             ),
             None,
         )
@@ -760,13 +858,10 @@ class SkillBankV0:
         skill_type = _valid_skill_type(update.get("skill_type"))
         if old.skill_type != skill_type:
             raise ValueError("rewrite must preserve skill_type.")
-        if skill_type == "issue_skill" and update.get("knowledge_edit") is not None:
-            card = _apply_issue_knowledge_edit(old, update["knowledge_edit"])
-        else:
-            card = _valid_complete_skill(update.get("skill"), skill_type)
-        if card["value"] != old.value:
+        card = _valid_complete_skill(update.get("skill"), skill_type)
+        if _card_identity(skill_type, card) != _skill_identity(old):
             raise ValueError(
-                "rewrite must preserve the target skill value; use create_new for a new semantic center."
+                "rewrite must preserve the target semantic identity; use create_new for a new center."
             )
         new = DimensionSkill(
             skill_id=old.skill_id,
@@ -798,7 +893,7 @@ class SkillBankV0:
         }
 
     def _warm_embedding(self, skill: DimensionSkill) -> dict[str, Any]:
-        if self.embedding_client is None:
+        if self.embedding_client is None or skill.skill_type != "project_skill":
             return {"enabled": False}
         try:
             store = SkillEmbeddingStore(self.embedding_config.cache_path, model_id=self.embedding_config.model_id)
@@ -820,62 +915,43 @@ def _valid_skill_type(value: Any) -> str:
 def _valid_complete_skill(value: Any, skill_type: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("create/rewrite requires a complete skill object.")
-    card = {
-        "value": str(value.get("value") or "").strip(),
-        "title": str(value.get("title") or "").strip(),
-        "trigger": str(value.get("trigger") or "").strip(),
-        "knowledge": (
-            validate_issue_knowledge(value.get("knowledge"))
-            if skill_type == "issue_skill"
-            else validate_atomic_knowledge(value.get("knowledge"))
-        ),
-    }
+    if skill_type == "fault_skill":
+        subtype = str(value.get("fault_subtype") or "").strip()
+        card = {
+            "value": subtype,
+            "fault_family": validate_fault_family(value.get("fault_family")),
+            "fault_subtype": subtype,
+            "title": str(value.get("title") or "").strip(),
+            "trigger": str(value.get("trigger") or "").strip(),
+            "knowledge": validate_fault_knowledge(value.get("knowledge")),
+        }
+    else:
+        card = {
+            "value": str(value.get("value") or "").strip(),
+            "title": str(value.get("title") or "").strip(),
+            "trigger": str(value.get("trigger") or "").strip(),
+            "knowledge": validate_atomic_knowledge(value.get("knowledge")),
+        }
     missing = [key for key in ("value", "title", "trigger", "knowledge") if not card[key]]
     if missing:
         raise ValueError(f"Complete skill object missing: {', '.join(missing)}")
     return card
 
 
-def _apply_issue_knowledge_edit(old: DimensionSkill, raw_edit: Any) -> dict[str, Any]:
-    """Apply one stable-ID Issue proposition edit while preserving card identity."""
+def _skill_identity(skill: DimensionSkill) -> tuple[str, ...]:
+    if skill.skill_type == "fault_skill":
+        return (skill.skill_type, str(skill.fault_family), str(skill.fault_subtype))
+    if skill.skill_type == "project_skill" and skill.repo_id:
+        return (skill.skill_type, skill.repo_id)
+    return (skill.skill_type, skill.value)
 
-    if not isinstance(raw_edit, dict):
-        raise ValueError("Issue rewrite requires a knowledge_edit object.")
-    operation = str(raw_edit.get("operation") or "").strip()
-    if operation not in {"add", "replace", "delete"}:
-        raise ValueError("Issue knowledge_edit.operation must be add, replace, or delete.")
-    raw_target = raw_edit.get("target_knowledge_id")
-    try:
-        target_id = int(raw_target) if raw_target is not None else None
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Issue knowledge_edit.target_knowledge_id must be a number or null.") from exc
-    items = [dict(item) for item in old.knowledge]
-    by_id = {int(item["id"]): index for index, item in enumerate(items)}
-    text = str(raw_edit.get("text") or "").strip()
-    if operation == "add":
-        if target_id is not None:
-            raise ValueError("Issue add requires target_knowledge_id=null.")
-        if not text:
-            raise ValueError("Issue add requires text.")
-        items.append({"id": max(by_id, default=0) + 1, "text": text})
-    else:
-        if target_id is None or target_id not in by_id:
-            raise ValueError("Issue replace/delete must target an existing knowledge ID.")
-        index = by_id[target_id]
-        if operation == "replace":
-            if not text:
-                raise ValueError("Issue replace requires text.")
-            items[index] = {"id": target_id, "text": text}
-        else:
-            items.pop(index)
-            if not items:
-                raise ValueError("Issue delete cannot remove the last knowledge proposition.")
-    return {
-        "value": old.value,
-        "title": old.title,
-        "trigger": old.trigger,
-        "knowledge": validate_issue_knowledge(items),
-    }
+
+def _card_identity(skill_type: str, card: dict[str, Any]) -> tuple[str, ...]:
+    if skill_type == "fault_skill":
+        return (skill_type, str(card["fault_family"]), str(card["fault_subtype"]))
+    if skill_type == "project_skill" and card.get("repo_id"):
+        return (skill_type, normalize_repo_id(card["repo_id"]))
+    return (skill_type, str(card["value"]))
 
 
 def _unique_skill_id(existing: list[DimensionSkill], base: str) -> str:

@@ -48,8 +48,8 @@ def _select_head_tail(
         "project_skill_request",
         "project_skill_loaded",
         "issue_revealed",
-        "issue_skill_request",
-        "issue_skill_loaded",
+        "fault_skill_request",
+        "fault_skill_loaded",
         "strategy_skill_request",
         "strategy_skill_loaded",
     }
@@ -84,7 +84,7 @@ def _select_head_tail(
         "field_limits": FIELD_LIMITS,
         "notes": [
             "Head events preserve initial repository exploration.",
-            "Project, Issue, and Strategy requests, loads, and nearby observations are always retained.",
+            "Project, Fault, and Strategy requests, loads, and nearby observations are always retained.",
             "Tail events preserve final ranking, repair, forced finish, or failure behavior.",
             "Tool observations are clipped by field budget; the compactor does not infer new knowledge.",
         ],
@@ -113,8 +113,8 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
         "project_skill_request",
         "project_skill_loaded",
         "issue_revealed",
-        "issue_skill_request",
-        "issue_skill_loaded",
+        "fault_skill_request",
+        "fault_skill_loaded",
         "strategy_skill_request",
         "strategy_skill_loaded",
     ):

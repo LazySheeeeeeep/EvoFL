@@ -7,10 +7,17 @@ from typing import Any
 
 from evolutefl.config import resolve_path
 from evolutefl.evaluation import evaluate_ranked_functions
+from evolutefl.evaluation.patch_ground_truth import split_function_identity
 from evolutefl.json_utils import extract_json_object, write_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.skills import make_skill_bank
-from evolutefl.skills.schema import validate_portable_skill_card
+from evolutefl.skills.fault_taxonomy import compact_fault_taxonomy, validate_fault_family
+from evolutefl.skills.schema import (
+    normalize_repo_id,
+    validate_portable_skill_card,
+    validate_project_add,
+    validate_project_create,
+)
 
 from .reflector import run_reflector
 from .trajectory_compactor import build_compacted_trajectory
@@ -18,15 +25,15 @@ from .trajectory_compactor import build_compacted_trajectory
 
 V3_REQUIRED_EVENTS = {
     "project_skill_request", "project_skill_loaded", "issue_revealed",
-    "issue_skill_request", "issue_skill_loaded", "strategy_skill_request", "strategy_skill_loaded",
+    "fault_skill_request", "fault_skill_loaded", "strategy_skill_request", "strategy_skill_loaded",
 }
 
 
 def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
-    """Run a static Project builder plus case-derived Issue/Strategy reflection.
+    """Run a static Project builder plus case-derived Fault/Strategy reflection.
 
     Project creation is deliberately isolated from issue, outcome, ranked
-    candidates and patch material. Issue and Strategy are the only case
+    candidates and patch material. Fault and Strategy are the only case
     feedback updates, so a failure cannot silently rewrite static knowledge.
     """
     from .case_evolution import _eligibility, _label_outcome, _read_trajectory
@@ -40,29 +47,47 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
     events = {str(item.get("event") or "") for item in trajectory}
     missing = sorted(V3_REQUIRED_EVENTS - events)
     stage_state = {"compatible": not missing, "missing_events": missing,
-                   **{kind: _stage_state(trajectory, kind) for kind in ("project_skill", "issue_skill", "strategy_skill")}}
+                   **{kind: _stage_state(trajectory, kind) for kind in ("project_skill", "fault_skill", "strategy_skill")}}
     ground_truth = kwargs.get("ground_truth_functions") or []
     outcome = _label_outcome(result, result.get("ranked_functions") or [], ground_truth, bool(kwargs.get("force")))
-    eligible, reason = _eligibility(result, outcome, ground_truth, bool(kwargs.get("force")),
-                                    reflect_success=bool(kwargs.get("reflect_success")),
-                                    reflect_failure=bool(kwargs.get("reflect_failure", True)))
+    # V3 learns Fault guidance from every completed case: hits reinforce a
+    # successful candidate-formation path, while misses capture an omitted
+    # investigation direction. Non-completed runs remain ineligible.
+    eligible, reason = _eligibility(
+        result,
+        outcome,
+        ground_truth,
+        bool(kwargs.get("force")),
+        reflect_success=True,
+        reflect_failure=True,
+    )
     if not stage_state["compatible"]:
         eligible, reason = False, "incompatible V3 trajectory: " + ", ".join(missing)
     client = kwargs.get("llm_client") or OpenAICompatibleClient.from_config(config.get("llm", {}))
     bank = make_skill_bank(config)
-    project_result = _run_project_builder(
-        bank,
-        client,
-        repo,
-        trajectory,
-        out_dir,
-        config,
-        repository_manifest=_read_json_if_present(case_dir / "repository_manifest.json"),
-        completed=str(result.get("status") or "") == "completed",
+    fault_only = bool(kwargs.get("fault_only"))
+    project_result = (
+        {
+            "decision": "preserve_existing",
+            "reason": "Skipped during Fault-only trajectory replay.",
+            "applied_updates": [],
+        }
+        if fault_only
+        else _run_project_builder(
+            bank,
+            client,
+            repo,
+            trajectory,
+            out_dir,
+            config,
+            repository_manifest=_read_json_if_present(case_dir / "repository_manifest.json"),
+            completed=str(result.get("status") or "") == "completed",
+        )
     )
+    project_applied_updates = list(project_result.get("applied_updates", []))
     summary: dict[str, Any] = {"eligible": eligible, "reason": reason, "repo": repo, "outcome": outcome,
                                "stage_state": stage_state, "project_knowledge": project_result,
-                               "applied_updates": project_result.get("applied_updates", []), "updated_skill_ids": []}
+                               "applied_updates": list(project_applied_updates), "updated_skill_ids": []}
     if not eligible:
         write_json(out_dir / "case_evolution_summary.json", summary)
         return summary
@@ -76,58 +101,89 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
     }
     write_json(out_dir / "trajectory_evidence.json", evidence)
     queries = _generate_case_queries(client, evidence, bank.strategy_catalog(), out_dir, config)
-    context = bank.search_for_v3_evolution(issue_skill_query=queries["issue_skill_query"],
+    fault_catalog = bank.fault_catalog(queries["fault_family"])
+    fault_target = _select_fault_evolution_target(
+        client=client,
+        fault_family=queries["fault_family"],
+        fault_subtype_query=queries["fault_subtype_query"],
+        catalog=fault_catalog.get("candidate_skills") or [],
+        out_dir=out_dir,
+        config=config,
+    )
+    context = bank.search_for_v3_evolution(
+        fault_family=queries["fault_family"],
+        selected_fault_skill_id=fault_target.get("selected_skill_id"),
         selected_strategy_skill_id=queries.get("selected_strategy_skill_id"),
         strategy_diagnostic_context=queries["strategy_diagnostic_context"],
         limit_per_type=int((config.get("reflection") or {}).get("reflector_candidate_top_k", 5)))
+    context["fault_catalog_selection"] = fault_target
     write_json(out_dir / "reflector_skill_search_context.json", context)
     reflection_config = config.get("reflection") or {}
     learning_signals = _reflection_learning_signals(
         result.get("ranked_functions") or [], ground_truth
     )
-    issue_evidence = _build_skill_reflection_view(
-        evidence=evidence, trajectory=trajectory, skill_type="issue_skill",
-        learning_signal=learning_signals["issue_skill"],
+    fault_evidence = _build_skill_reflection_view(
+        evidence=evidence, trajectory=trajectory, skill_type="fault_skill",
+        learning_signal=learning_signals["fault_skill"],
     )
     strategy_evidence = _build_skill_reflection_view(
         evidence=evidence, trajectory=trajectory, skill_type="strategy_skill",
         learning_signal=learning_signals["strategy_skill"],
     )
-    issue_context = _skill_type_context(context, "issue_skill")
+    fault_context = _skill_type_context(context, "fault_skill")
     strategy_context = _skill_type_context(context, "strategy_skill")
-    write_json(out_dir / "issue_reflection_view.json", issue_evidence)
+    write_json(out_dir / "fault_reflection_view.json", fault_evidence)
     write_json(out_dir / "strategy_reflection_view.json", strategy_evidence)
 
-    issue_prompt = resolve_path(reflection_config.get(
-        "issue_reflector_prompt_path", "prompt_records/reflection/issue_reflector_v3.txt"
+    fault_prompt_key = (
+        "fault_success_reflector_prompt_path"
+        if learning_signals["fault_skill"]["label"] == "success"
+        else "fault_failure_reflector_prompt_path"
+    )
+    fault_prompt_default = (
+        "prompt_records/reflection/fault_success_reflector_v1.txt"
+        if learning_signals["fault_skill"]["label"] == "success"
+        else "prompt_records/reflection/fault_failure_reflector_v1.txt"
+    )
+    fault_prompt = resolve_path(reflection_config.get(
+        fault_prompt_key, fault_prompt_default
     )).read_text(encoding="utf-8")
     strategy_prompt = resolve_path(reflection_config.get(
         "strategy_reflector_prompt_path", "prompt_records/reflection/strategy_reflector_v3.txt"
     )).read_text(encoding="utf-8")
     reflector_attempts = int(reflection_config.get("reflector_attempts", 2))
-    issue_output = run_reflector(
-        trajectory_evidence=issue_evidence,
-        evolution_queries={"issue_skill_query": queries["issue_skill_query"]},
-        skill_search_context=issue_context, llm_client=client, prompt=issue_prompt,
-        attempts=reflector_attempts, output_path=out_dir / "issue_reflector_debug.json",
-        skill_types=("issue_skill",), strict_final_cards=True,
+    fault_output = run_reflector(
+        trajectory_evidence=fault_evidence,
+        evolution_queries={
+            "fault_family": queries["fault_family"],
+            "fault_subtype_query": queries["fault_subtype_query"],
+        },
+        skill_search_context=fault_context, llm_client=client, prompt=fault_prompt,
+        attempts=reflector_attempts, output_path=out_dir / "fault_reflector_debug.json",
+        skill_types=("fault_skill",), strict_final_cards=True,
         isolate_skill_errors_on_final_attempt=True,
     )
-    write_json(out_dir / "issue_reflector_output.json", issue_output)
-    strategy_output = run_reflector(
-        trajectory_evidence=strategy_evidence,
-        evolution_queries={
-            "strategy_diagnostic_context": queries["strategy_diagnostic_context"],
-            "selected_strategy_skill_id": queries.get("selected_strategy_skill_id"),
-            "strategy_selection_reason": queries.get("strategy_selection_reason", ""),
-        },
-        skill_search_context=strategy_context, llm_client=client, prompt=strategy_prompt,
-        attempts=reflector_attempts, output_path=out_dir / "strategy_reflector_debug.json",
-        skill_types=("strategy_skill",), strict_final_cards=True,
-        isolate_skill_errors_on_final_attempt=True,
+    write_json(out_dir / "fault_reflector_output.json", fault_output)
+    strategy_output = (
+        _skipped_reflector_output(
+            "strategy_skill", "Skipped during Fault-only trajectory replay."
+        )
+        if fault_only
+        else run_reflector(
+            trajectory_evidence=strategy_evidence,
+            evolution_queries={
+                "strategy_diagnostic_context": queries["strategy_diagnostic_context"],
+                "selected_strategy_skill_id": queries.get("selected_strategy_skill_id"),
+                "strategy_selection_reason": queries.get("strategy_selection_reason", ""),
+            },
+            skill_search_context=strategy_context, llm_client=client, prompt=strategy_prompt,
+            attempts=reflector_attempts, output_path=out_dir / "strategy_reflector_debug.json",
+            skill_types=("strategy_skill",), strict_final_cards=True,
+            isolate_skill_errors_on_final_attempt=True,
+        )
     )
     write_json(out_dir / "strategy_reflector_output.json", strategy_output)
-    output = _merge_reflector_outputs(issue_output, strategy_output, learning_signals)
+    output = _merge_reflector_outputs(fault_output, strategy_output, learning_signals)
     write_json(out_dir / "reflector_output.json", output)
     applied, applied_materialized, failed = [], [], []
     for update in output.get("materialized_updates", []):
@@ -145,7 +201,16 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
     write_json(out_dir / "applied_updates.json", applied)
     write_json(out_dir / "failed_updates.json", failed)
     summary["applied_updates"].extend(applied)
+    runtime_fault_family = str(
+        ((stage_state.get("fault_skill") or {}).get("request") or {}).get("request", {}).get("fault_family")
+        or ""
+    )
     summary.update({"evolution_queries": queries, "learning_signals": learning_signals,
+                    "fault_only": fault_only,
+                    "runtime_fault_family": runtime_fault_family or None,
+                    "reflector_fault_family": queries["fault_family"],
+                    "fault_family_consistent": runtime_fault_family == queries["fault_family"],
+                    "fault_target_selection": fault_target,
                     "skill_updates": output.get("skill_updates"),
                     "updated_skill_ids": [item.get("updated_skill_id") for item in summary["applied_updates"] if item.get("updated_skill_id")],
                     "failed_updates": failed})
@@ -156,7 +221,7 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
             "target_skill_id": None,
             "updated_skill_id": item.get("updated_skill_id"),
         }
-        for item in project_result.get("applied_updates", [])
+        for item in project_applied_updates
     ] + applied_materialized
     summary["materialized_updates"] = materialized_updates
     summary["updated_skill_types"] = sorted({
@@ -167,6 +232,18 @@ def run_v3_case_evolution(**kwargs: Any) -> dict[str, Any]:
     return summary
 
 
+def _skipped_reflector_output(skill_type: str, reason: str) -> dict[str, Any]:
+    """Return a merge-compatible no-op result for an intentionally skipped call."""
+
+    return {
+        "case_summary": reason,
+        "skill_updates": {skill_type: None},
+        "materialized_updates": [],
+        "protocol_errors": [],
+        "no_update_reason": reason,
+    }
+
+
 def _reflection_learning_signals(
     ranked_functions: list[str], ground_truth_functions: list[str]
 ) -> dict[str, dict[str, Any]]:
@@ -174,7 +251,7 @@ def _reflection_learning_signals(
 
     metrics = evaluate_ranked_functions(ranked_functions, ground_truth_functions)
     rank = metrics.get("rank")
-    issue_signal = {
+    fault_signal = {
         "label": "success" if metrics.get("top5") else "failure",
         "target_rank": rank,
         "reason": (
@@ -182,14 +259,23 @@ def _reflection_learning_signals(
             if metrics.get("top5")
             else "The ground-truth function never entered the final Top-5 candidate set."
         ),
-        "learning_scope": "issue-guided candidate formation",
+        "learning_scope": "fault-guided candidate formation",
     }
+    granularity_matches = _enclosing_symbol_matches(
+        ranked_functions, ground_truth_functions
+    )
     if rank == 1:
         strategy_label = "success"
         strategy_reason = "The ground-truth function was ranked first."
     elif isinstance(rank, int) and rank <= 5:
         strategy_label = "failure"
         strategy_reason = "The ground-truth function was found but ranked below another candidate."
+    elif granularity_matches:
+        strategy_label = "granularity_mismatch"
+        strategy_reason = (
+            "The final candidates identified an enclosing symbol in the correct file, but did not "
+            "refine it to the ground-truth function."
+        )
     else:
         strategy_label = "not_applicable"
         strategy_reason = (
@@ -197,12 +283,39 @@ def _reflection_learning_signals(
             "candidate formation."
         )
     return {
-        "issue_skill": issue_signal,
+        "fault_skill": fault_signal,
         "strategy_skill": {
             "label": strategy_label, "target_rank": rank, "reason": strategy_reason,
-            "learning_scope": "candidate comparison and final ranking",
+            "learning_scope": (
+                "candidate refinement from an enclosing symbol to a responsible function"
+                if strategy_label == "granularity_mismatch"
+                else "candidate comparison and final ranking"
+            ),
+            "granularity_matches": granularity_matches if strategy_label == "granularity_mismatch" else [],
         },
     }
+
+
+def _enclosing_symbol_matches(
+    ranked_functions: list[str], ground_truth_functions: list[str],
+) -> list[dict[str, str]]:
+    """Find class-or-container candidates that enclose an omitted target function."""
+
+    matches: list[dict[str, str]] = []
+    for prediction in ranked_functions[:5]:
+        prediction_file, prediction_symbol = split_function_identity(prediction)
+        if not prediction_symbol:
+            continue
+        for ground_truth in ground_truth_functions:
+            ground_truth_file, ground_truth_symbol = split_function_identity(ground_truth)
+            if prediction_file != ground_truth_file:
+                continue
+            if ground_truth_symbol.startswith(f"{prediction_symbol}."):
+                matches.append({
+                    "enclosing_candidate": prediction,
+                    "ground_truth_function": ground_truth,
+                })
+    return matches
 
 
 def _build_skill_reflection_view(
@@ -211,23 +324,30 @@ def _build_skill_reflection_view(
 ) -> dict[str, Any]:
     """Build a stage-bounded evidence view for one independent Reflector."""
 
-    if skill_type == "issue_skill":
+    if skill_type == "fault_skill":
         phase_events = _events_between(
             trajectory, start_event="issue_revealed", stop_event="strategy_skill_request"
         )
         stage_state = {
             name: (evidence.get("stage_state") or {}).get(name)
-            for name in ("project_skill", "issue_skill")
+            for name in ("project_skill", "fault_skill")
         }
-        scope = "Issue-guided exploration and formation of the final candidate set."
+        scope = "Fault-guided exploration and formation of the final candidate set."
     else:
+        is_granularity_mismatch = str(learning_signal.get("label") or "") == "granularity_mismatch"
         phase_events = _events_between(
-            trajectory, start_event="strategy_skill_request", stop_event=None
+            trajectory,
+            start_event="issue_revealed" if is_granularity_mismatch else "strategy_skill_request",
+            stop_event=None,
         )
         stage_state = {
             "strategy_skill": (evidence.get("stage_state") or {}).get("strategy_skill")
         }
-        scope = "Comparison of concrete candidates and their final ordering."
+        scope = (
+            "Refinement from an observed enclosing symbol to the responsible function."
+            if is_granularity_mismatch
+            else "Comparison of concrete candidates and their final ordering."
+        )
     view = {
         "case": evidence.get("case") or {},
         "problem_statement": evidence.get("problem_statement", ""),
@@ -280,37 +400,37 @@ def _skill_type_context(context: dict[str, Any], skill_type: str) -> dict[str, A
 
 
 def _merge_reflector_outputs(
-    issue_output: dict[str, Any], strategy_output: dict[str, Any],
+    fault_output: dict[str, Any], strategy_output: dict[str, Any],
     learning_signals: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """Keep the historical combined artifact while preserving call isolation."""
 
     materialized = [
-        *(issue_output.get("materialized_updates") or []),
+        *(fault_output.get("materialized_updates") or []),
         *(strategy_output.get("materialized_updates") or []),
     ]
     reasons = [
         str(value.get("no_update_reason") or "").strip()
-        for value in (issue_output, strategy_output) if value.get("no_update_reason")
+        for value in (fault_output, strategy_output) if value.get("no_update_reason")
     ]
     return {
         "case_summary": " | ".join(filter(None, [
-            str(issue_output.get("case_summary") or "").strip(),
+            str(fault_output.get("case_summary") or "").strip(),
             str(strategy_output.get("case_summary") or "").strip(),
         ])),
-        "outcome_type": str((learning_signals.get("issue_skill") or {}).get("label") or "failure"),
+        "outcome_type": str((learning_signals.get("fault_skill") or {}).get("label") or "failure"),
         "learning_signals": learning_signals,
         "skill_updates": {
-            "issue_skill": (issue_output.get("skill_updates") or {}).get("issue_skill"),
+            "fault_skill": (fault_output.get("skill_updates") or {}).get("fault_skill"),
             "strategy_skill": (strategy_output.get("skill_updates") or {}).get("strategy_skill"),
         },
         "materialized_updates": materialized,
         "protocol_errors": [
-            *(issue_output.get("protocol_errors") or []),
+            *(fault_output.get("protocol_errors") or []),
             *(strategy_output.get("protocol_errors") or []),
         ],
         "no_update_reason": None if materialized else "; ".join(reasons) or "No reusable update was selected.",
-        "reflection_runs": {"issue_skill": issue_output, "strategy_skill": strategy_output},
+        "reflection_runs": {"fault_skill": fault_output, "strategy_skill": strategy_output},
     }
 
 
@@ -344,7 +464,7 @@ def _run_project_builder(
 ) -> dict[str, Any]:
     """Build static Project knowledge without exposing case outcome material."""
     if not completed:
-        return {"decision": "preserve_existing", "reason": "Explorer did not complete.", "applied_updates": []}
+        return {"decision": "no_update", "reason": "Explorer did not complete.", "applied_updates": []}
     # Static Project knowledge may use only events before the issue is exposed.
     # Later assistant/tool messages often quote the issue and would otherwise
     # leak failure-specific information into a supposedly repository-only card.
@@ -356,19 +476,15 @@ def _run_project_builder(
             "assistant_tool_calls", "tool_result", "project_skill_request", "project_skill_loaded"
         }:
             orientation.append(event)
-    request = next((event for event in trajectory if event.get("event") == "project_skill_request"), {})
-    request_query = str(request.get("query") or request.get("system_summary") or repo).strip()
-    candidate_context = bank.search_project_candidates(request_query, limit=5)
+    repo_id = normalize_repo_id(repo)
+    current_project_skill = bank.get_project_skill(repo_id)
     evidence = {
-        "repo": repo,
+        "repo_id": repo_id,
         "repository_manifest": repository_manifest,
         "repository_orientation": build_compacted_trajectory(orientation),
-        "same_type_candidates": candidate_context.get("candidate_skills", []),
+        "current_project_skill": current_project_skill,
     }
     write_json(out_dir / "project_knowledge_evidence.json", evidence)
-    loaded = next((event for event in trajectory if event.get("event") == "project_skill_loaded"), {})
-    if loaded.get("loaded_skill_id"):
-        return {"decision": "preserve_existing", "reason": "A Project Skill was already matched at runtime.", "applied_updates": []}
     prompt_path = resolve_path((config.get("reflection") or {}).get("project_builder_prompt_path", "prompt_records/reflection/project_knowledge_builder_v3.txt"))
     base_messages = [
         {"role": "system", "content": prompt_path.read_text(encoding="utf-8")},
@@ -388,15 +504,34 @@ def _run_project_builder(
         content = response.get("content") or ""
         try:
             raw = extract_json_object(content)
-            decision = str(raw.get("decision") or "preserve_existing")
-            if decision != "create_new":
+            decision = str(raw.get("decision") or "no_update")
+            if decision == "no_update":
                 write_json(out_dir / "project_knowledge_output.json", {
                     "attempt": attempt, "project_builder_output": raw, "attempts": attempts_log,
                 })
-                return {"decision": decision, "reason": str(raw.get("reason") or ""), "applied_updates": []}
-            card = validate_portable_skill_card(raw.get("skill") or {}, skill_type="project_skill")
-            applied = bank.apply_update({"operation": "create", "skill_type": "project_skill", "target_skill_id": None,
-                                         "skill": card, "rationale": str(raw.get("reason") or "Repository orientation."), "source_cases": []})
+                return {
+                    "decision": decision,
+                    "reason": str(raw.get("reason") or ""),
+                    "applied_updates": [],
+                }
+            if decision == "create_new":
+                if current_project_skill is not None:
+                    raise ValueError("create_new is invalid because this repository already has a Project Skill.")
+                card = validate_project_create(raw.get("skill"), expected_repo_id=repo_id)
+                update = {"decision": "create_new", "repo_id": repo_id, "skill": card}
+            elif decision == "add":
+                if current_project_skill is None:
+                    raise ValueError("add is invalid because this repository has no Project Skill yet.")
+                if normalize_repo_id(raw.get("repo_id") or repo_id) != repo_id:
+                    raise ValueError("add repo_id must match the current repository.")
+                update = {
+                    "decision": "add",
+                    "repo_id": repo_id,
+                    "knowledge_to_add": validate_project_add(raw.get("knowledge_to_add")),
+                }
+            else:
+                raise ValueError(f"Unsupported Project decision: {decision!r}.")
+            applied = bank.apply_project_update(update)
             attempts_log.append({"attempt": attempt, "status": "accepted", "raw_response": content})
             write_json(out_dir / "project_knowledge_output.json", {
                 "attempt": attempt, "project_builder_output": raw, "attempts": attempts_log,
@@ -407,15 +542,15 @@ def _run_project_builder(
             messages = base_messages + [{
                 "role": "user",
                 "content": (
-                    "Return the exact JSON schema again. For create_new, provide exactly three "
-                    "portable knowledge statements, each no longer than 360 characters. "
+                    "Return one valid Project decision using the independent create_new/add/no_update "
+                    "schema. Keep repo_id equal to the input repo_id and use atomic static facts. "
                     f"Validation feedback: {exc}"
                 ),
             }]
     write_json(out_dir / "project_knowledge_output.json", {"failed": True, "attempts": attempts_log})
     return {
-        "decision": "preserve_existing",
-        "reason": "Project Builder could not produce a valid compact static card.",
+        "decision": "no_update",
+        "reason": "Project Builder could not produce a valid repository knowledge update.",
         "applied_updates": [],
     }
 
@@ -434,7 +569,11 @@ def _generate_case_queries(client: Any, evidence: dict[str, Any], catalog: list[
     prompt_path = resolve_path((config.get("reflection") or {}).get("evolution_query_prompt_path", "prompt_records/reflection/evolution_query_v3.txt"))
     base_messages = [
         {"role": "system", "content": prompt_path.read_text(encoding="utf-8")},
-        {"role": "user", "content": json.dumps({"trajectory_evidence": evidence, "strategy_skill_catalog": catalog}, ensure_ascii=False)},
+        {"role": "user", "content": json.dumps({
+            "trajectory_evidence": evidence,
+            "fault_taxonomy": compact_fault_taxonomy(),
+            "strategy_skill_catalog": catalog,
+        }, ensure_ascii=False)},
     ]
     messages = list(base_messages)
     errors: list[dict[str, Any]] = []
@@ -444,7 +583,8 @@ def _generate_case_queries(client: Any, evidence: dict[str, Any], catalog: list[
         content = response.get("content") or ""
         try:
             result = extract_json_object(content)
-            for key in ("issue_skill_query", "strategy_diagnostic_context"):
+            result["fault_family"] = validate_fault_family(result.get("fault_family"))
+            for key in ("fault_subtype_query", "strategy_diagnostic_context"):
                 if not str(result.get(key) or "").strip():
                     raise ValueError(f"V3 evolution query missing {key}.")
             write_json(out_dir / "evolution_queries.json", {
@@ -455,7 +595,93 @@ def _generate_case_queries(client: Any, evidence: dict[str, Any], catalog: list[
             errors.append({"attempt": attempt, "error": str(exc), "raw_response": content})
             messages = base_messages + [{
                 "role": "user",
-                "content": "Return the exact requested JSON object with non-empty issue_skill_query and strategy_diagnostic_context.",
+                "content": (
+                    "Return the exact requested JSON object with one valid fault_family and "
+                    "non-empty fault_subtype_query and strategy_diagnostic_context."
+                ),
             }]
     write_json(out_dir / "evolution_queries.json", {"failed": True, "attempts": errors})
     raise ValueError(f"V3 evolution query generation failed: {errors[-1]['error']}")
+
+
+def _select_fault_evolution_target(
+    *,
+    client: Any,
+    fault_family: str,
+    fault_subtype_query: str,
+    catalog: list[dict[str, Any]],
+    out_dir: Path,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Select one same-family update target without exposing catalog knowledge."""
+
+    family = validate_fault_family(fault_family)
+    catalog_ids = {str(item.get("skill_id") or "") for item in catalog}
+    catalog_json = json.dumps(catalog, ensure_ascii=False)
+    if not catalog:
+        result = {
+            "selected_skill_id": None,
+            "reason": "No active Fault Skill exists in the classified family.",
+            "fault_family": family,
+            "catalog_count": 0,
+            "catalog_char_count": 2,
+        }
+        write_json(out_dir / "fault_skill_target_selection.json", result)
+        return result
+    reflection_config = config.get("reflection") or {}
+    prompt_path = resolve_path(reflection_config.get(
+        "fault_target_selector_prompt_path",
+        "prompt_records/reflection/fault_skill_target_selector_v1.txt",
+    ))
+    payload = {
+        "fault_family": family,
+        "fault_subtype_query": str(fault_subtype_query or "").strip(),
+        "candidates": catalog,
+    }
+    base_messages = [
+        {"role": "system", "content": prompt_path.read_text(encoding="utf-8")},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    attempts = max(1, int(reflection_config.get("fault_target_selector_attempts", 2)))
+    errors: list[dict[str, Any]] = []
+    messages = list(base_messages)
+    for attempt in range(1, attempts + 1):
+        response = client.chat(
+            messages=messages,
+            tool_choice="none",
+            response_format={"type": "json_object"},
+            temperature=0,
+        )
+        content = response.get("content") or ""
+        try:
+            selected = extract_json_object(content)
+            selected_id = str(selected.get("selected_skill_id") or "").strip() or None
+            if selected_id is not None and selected_id not in catalog_ids:
+                raise ValueError("selected_skill_id must be from the supplied family catalog or null.")
+            result = {
+                "selected_skill_id": selected_id,
+                "reason": str(selected.get("reason") or "").strip(),
+                "fault_family": family,
+                "catalog_count": len(catalog),
+                "catalog_char_count": len(catalog_json),
+                "selector_input_char_count": len(json.dumps(payload, ensure_ascii=False)),
+                "attempt": attempt,
+            }
+            write_json(out_dir / "fault_skill_target_selection.json", result)
+            return result
+        except Exception as exc:  # retry the same compact directory
+            errors.append({"attempt": attempt, "error": str(exc), "raw_response": content})
+            messages = base_messages + [{
+                "role": "user",
+                "content": "Return selected_skill_id from the supplied catalog or null, plus a short reason.",
+            }]
+    result = {
+        "selected_skill_id": None,
+        "reason": "Fault target selector failed; no existing Skill is safe to rewrite.",
+        "fault_family": family,
+        "catalog_count": len(catalog),
+        "catalog_char_count": len(catalog_json),
+        "attempts": errors,
+    }
+    write_json(out_dir / "fault_skill_target_selection.json", result)
+    return result

@@ -35,9 +35,6 @@ def make_skill_bank(config: dict[str, Any]) -> SkillBankV0:
         project_skill_embedding_min_score=_optional_float(
             bank_cfg.get("project_skill_embedding_min_score")
         ),
-        issue_skill_embedding_min_score=_optional_float(
-            bank_cfg.get("issue_skill_embedding_min_score")
-        ),
         strategy_skill_embedding_min_score=_optional_float(
             bank_cfg.get("strategy_skill_embedding_min_score")
         ),
@@ -46,11 +43,6 @@ def make_skill_bank(config: dict[str, Any]) -> SkillBankV0:
             # native Project selector is the applicability gate and may
             # return none after inspecting component roles and boundaries.
             bank_cfg.get("project_skill_candidate_min_score", 0.0)
-        ),
-        issue_skill_candidate_min_score=float(
-            # Embedding provides a compact Issue neighborhood. The selector and
-            # validator, rather than a global numeric cutoff, decide injection.
-            bank_cfg.get("issue_skill_candidate_min_score", 0.0)
         ),
         evolution_candidate_min_score=float(
             bank_cfg.get("evolution_candidate_min_score", 0.25)

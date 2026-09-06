@@ -29,7 +29,7 @@ from evolutefl.skills import make_skill_bank  # noqa: E402
 
 DEFAULT_DATASETS = ("SWE-bench/SWE-bench", "princeton-nlp/SWE-bench", "SWE-bench/SWE-bench_Lite")
 DEFAULT_OUTPUT_DIR = "runs/swe_bench_15_compare_gpt5mini_20260622"
-SKILL_TYPES = ("project_skill", "strategy_skill")
+SKILL_TYPES = ("project_skill", "fault_skill", "strategy_skill")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 DIFF_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$")
 

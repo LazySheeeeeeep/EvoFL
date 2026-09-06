@@ -11,9 +11,10 @@ from evolutefl.skills.schema import (
     FINAL_MAX_STATEMENT_CHARS,
     SKILL_TYPES,
     validate_atomic_knowledge,
-    validate_issue_knowledge,
+    validate_fault_knowledge,
     validate_portable_skill_card,
 )
+from evolutefl.skills.fault_taxonomy import validate_fault_family
 
 
 UPDATE_DECISIONS = ("create_new", "rewrite_existing", "preserve_existing", "no_update")
@@ -197,10 +198,10 @@ def _reflector_repair_instruction(
     skill_types: tuple[str, ...] | None, error: Exception
 ) -> str:
     requested = tuple(skill_types or LEGACY_REFLECTOR_SKILL_TYPES)
-    if requested == ("issue_skill",):
+    if requested == ("fault_skill",):
         contract = (
-            "Return only skill_updates.issue_skill. A create_new card has exactly one initial "
-            "knowledge proposition; rewrite_existing uses exactly one knowledge_edit."
+            "Return only skill_updates.fault_skill. create_new and rewrite_existing provide a "
+            "complete card with fault_family, fault_subtype, title, trigger, and knowledge."
         )
     elif requested == ("strategy_skill",):
         contract = (
@@ -209,8 +210,8 @@ def _reflector_repair_instruction(
         )
     else:
         contract = (
-            "A new Issue Skill has exactly one initial knowledge proposition; an Issue rewrite "
-            "has exactly one knowledge_edit. Project and Strategy create_new or rewrite_existing "
+            "Fault create_new or rewrite_existing provides a complete card. Project and Strategy "
+            "create_new or rewrite_existing "
             f"cards provide exactly three knowledge statements at or below {FINAL_MAX_STATEMENT_CHARS} characters."
         )
     return (
@@ -645,8 +646,7 @@ def validate_reflector_output(
     materialized: list[dict[str, Any]] = []
     protocol_errors: list[dict[str, str]] = []
     # Existing V2 callers deliberately keep their two-card schema. V3 passes
-    # its explicit Issue/Strategy pair, so adding issue_skill does not mutate
-    # historical reflection protocol behavior.
+    # its explicit Fault/Strategy pair.
     for skill_type in (skill_types or LEGACY_REFLECTOR_SKILL_TYPES):
         raw = raw_updates.get(skill_type)
         try:
@@ -691,7 +691,6 @@ def _isolated_no_update(reason: str) -> dict[str, Any]:
         "target_skill_id": None,
         "rationale": reason,
         "skill": None,
-        "knowledge_edit": None,
         "no_update_reason": reason,
     }
 
@@ -713,7 +712,6 @@ def _validate_skill_update(
     rationale = str(raw_update.get("rationale") or "").strip()
     reason = str(raw_update.get("no_update_reason") or "").strip()
     raw_skill = raw_update.get("skill")
-    raw_knowledge_edit = raw_update.get("knowledge_edit")
 
     if decision == "no_update":
         if target or raw_skill not in (None, {}):
@@ -725,7 +723,6 @@ def _validate_skill_update(
             "target_skill_id": None,
             "rationale": rationale,
             "skill": None,
-            "knowledge_edit": None,
             "no_update_reason": reason or rationale,
         }, None
 
@@ -734,10 +731,8 @@ def _validate_skill_update(
     if decision == "create_new":
         if target:
             raise ValueError(f"skill_updates.{skill_type} create_new requires null target_skill_id.")
-        skill = (
-            _validate_issue_create_skill(raw_skill)
-            if skill_type == "issue_skill"
-            else _validate_complete_skill(raw_skill, skill_type, strict_final_cards=strict_final_cards)
+        skill = _validate_complete_skill(
+            raw_skill, skill_type, strict_final_cards=strict_final_cards
         )
         operation = "create"
     else:
@@ -756,33 +751,9 @@ def _validate_skill_update(
                 "target_skill_id": target,
                 "rationale": rationale,
                 "skill": None,
-                "knowledge_edit": None,
                 "no_update_reason": None,
             }, _materialize_update(
                 update_index, "preserve", skill_type, target, None, rationale, outcome_type, source_case
-            )
-        if skill_type == "issue_skill":
-            if raw_skill not in (None, {}):
-                raise ValueError("Issue rewrite_existing uses knowledge_edit, not a replacement card.")
-            knowledge_edit = _validate_issue_knowledge_edit(raw_knowledge_edit, candidate)
-            normalized = {
-                "decision": decision,
-                "target_skill_id": target,
-                "rationale": rationale,
-                "skill": None,
-                "knowledge_edit": knowledge_edit,
-                "no_update_reason": None,
-            }
-            return normalized, _materialize_update(
-                update_index,
-                "rewrite",
-                skill_type,
-                target,
-                None,
-                rationale,
-                outcome_type,
-                source_case,
-                knowledge_edit=knowledge_edit,
             )
         skill = _validate_complete_skill(raw_skill, skill_type, strict_final_cards=strict_final_cards)
         operation = "rewrite"
@@ -792,7 +763,6 @@ def _validate_skill_update(
         "target_skill_id": target,
         "rationale": rationale,
         "skill": skill,
-        "knowledge_edit": None,
         "no_update_reason": None,
     }
     return normalized, _materialize_update(
@@ -805,13 +775,24 @@ def _validate_complete_skill(
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"skill_updates.{skill_type}.skill must be a complete skill object.")
-    skill = {
-        "value": str(raw.get("value") or "").strip(),
-        "title": str(raw.get("title") or "").strip(),
-        "trigger": str(raw.get("trigger") or "").strip(),
-        "knowledge": validate_atomic_knowledge(raw.get("knowledge")),
-    }
-    missing = [key for key in ("value", "title", "trigger", "knowledge") if not skill[key]]
+    if skill_type == "fault_skill":
+        skill = {
+            "fault_family": validate_fault_family(raw.get("fault_family")),
+            "fault_subtype": str(raw.get("fault_subtype") or "").strip(),
+            "title": str(raw.get("title") or "").strip(),
+            "trigger": str(raw.get("trigger") or "").strip(),
+            "knowledge": validate_fault_knowledge(raw.get("knowledge")),
+        }
+        required = ("fault_family", "fault_subtype", "title", "trigger", "knowledge")
+    else:
+        skill = {
+            "value": str(raw.get("value") or "").strip(),
+            "title": str(raw.get("title") or "").strip(),
+            "trigger": str(raw.get("trigger") or "").strip(),
+            "knowledge": validate_atomic_knowledge(raw.get("knowledge")),
+        }
+        required = ("value", "title", "trigger", "knowledge")
+    missing = [key for key in required if not skill[key]]
     if missing:
         raise ValueError(f"skill_updates.{skill_type}.skill missing: {', '.join(missing)}")
     if strict_final_cards:
@@ -819,51 +800,6 @@ def _validate_complete_skill(
         # contract before an update can reach the active bank.
         skill = validate_portable_skill_card(skill, skill_type=skill_type)
     return skill
-
-
-def _validate_issue_create_skill(raw: Any) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise ValueError("Issue create_new requires a complete skill object.")
-    knowledge = validate_issue_knowledge(raw.get("knowledge"))
-    if len(knowledge) != 1:
-        raise ValueError("Issue create_new requires exactly one initial knowledge proposition.")
-    card = {
-        "value": str(raw.get("value") or "").strip(),
-        "title": str(raw.get("title") or "").strip(),
-        "trigger": str(raw.get("trigger") or "").strip(),
-        "knowledge": knowledge,
-    }
-    missing = [key for key in ("value", "title", "trigger", "knowledge") if not card[key]]
-    if missing:
-        raise ValueError(f"Issue create_new skill missing: {', '.join(missing)}")
-    return card
-
-
-def _validate_issue_knowledge_edit(raw: Any, candidate: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise ValueError("Issue rewrite_existing requires a knowledge_edit object.")
-    operation = str(raw.get("operation") or "").strip()
-    if operation not in {"add", "replace", "delete"}:
-        raise ValueError("Issue knowledge_edit.operation must be add, replace, or delete.")
-    raw_target = raw.get("target_knowledge_id")
-    try:
-        target = int(raw_target) if raw_target is not None else None
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Issue knowledge_edit.target_knowledge_id must be a number or null.") from exc
-    candidate_items = validate_issue_knowledge(candidate.get("knowledge"))
-    candidate_ids = {int(item["id"]) for item in candidate_items}
-    text = str(raw.get("text") or "").strip()
-    if operation == "add":
-        if target is not None or not text:
-            raise ValueError("Issue knowledge add requires null target_knowledge_id and non-empty text.")
-    else:
-        if target not in candidate_ids:
-            raise ValueError("Issue knowledge replace/delete must target an existing numeric knowledge ID.")
-        if operation == "replace" and not text:
-            raise ValueError("Issue knowledge replace requires non-empty text.")
-        if operation == "delete" and len(candidate_items) == 1:
-            raise ValueError("Issue knowledge delete cannot remove the final proposition.")
-    return {"operation": operation, "target_knowledge_id": target, "text": text or None}
 
 
 def _materialize_update(
@@ -875,8 +811,6 @@ def _materialize_update(
     rationale: str,
     outcome_type: str,
     source_case: str | None,
-    *,
-    knowledge_edit: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "update_id": f"update_{index:03d}_{skill_type}",
@@ -884,7 +818,6 @@ def _materialize_update(
         "skill_type": skill_type,
         "target_skill_id": target,
         "skill": skill,
-        "knowledge_edit": knowledge_edit,
         "rationale": rationale,
         "outcome_type": outcome_type,
         "source_cases": [source_case] if source_case else [],

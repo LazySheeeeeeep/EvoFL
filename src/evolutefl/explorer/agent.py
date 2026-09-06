@@ -366,6 +366,8 @@ class ExplorerAgent:
         skill_type: str,
         run_dir: Path,
         step: int,
+        *,
+        repo_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         name = PROJECT_SKILL_TOOL if skill_type == "project_skill" else STRATEGY_SKILL_TOOL
         if skill_type not in self.skill_bank.enabled_skill_types:
@@ -424,6 +426,49 @@ class ExplorerAgent:
         request_written = False
         try:
             arguments = _tool_arguments(tool_call)
+            if skill_type == "project_skill" and repo_id:
+                repository_summary = str(
+                    arguments.get("repository_summary")
+                    or arguments.get("architecture_signature")
+                    or arguments.get("project_type")
+                    or ""
+                ).strip()
+                request_event = {
+                    "event": "project_skill_request",
+                    "step": step,
+                    "repo_id": repo_id,
+                    "query": repo_id,
+                    "request": arguments,
+                    "repository_summary": repository_summary,
+                }
+                append_jsonl(run_dir / "trajectory.jsonl", request_event)
+                write_json(run_dir / "project_skill_request.json", request_event)
+                search = self.skill_bank.search_project_for_repo(repo_id)
+                normalized_repo_id = str(
+                    (search.get("skill_search_trace") or {}).get("repo_id") or repo_id
+                )
+                matched = (search.get("matched_skills") or [None])[0]
+                payload = {
+                    "skill_type": "project_skill",
+                    "repo_id": normalized_repo_id,
+                    "matched_skill": matched,
+                    "search_trace": search.get("skill_search_trace", {}),
+                }
+                write_json(run_dir / "project_skill_search.json", payload)
+                append_jsonl(
+                    run_dir / "trajectory.jsonl",
+                    {
+                        "event": "project_skill_loaded",
+                        "step": step,
+                        "repo_id": repo_id,
+                        "loaded_skill_id": (matched or {}).get("skill_id"),
+                        "matched_skill": matched,
+                        "search_trace": payload["search_trace"],
+                    },
+                )
+                return _tool_success(
+                    tool_call, payload, name=PROJECT_SKILL_TOOL, wrapped=False
+                ), matched
             project_type = str(arguments.get("project_type") or "").strip()
             if not project_type:
                 raise ValueError("project_type must be non-empty")
@@ -1197,20 +1242,27 @@ def _project_skill_tool_schema() -> dict[str, Any]:
     return openai_function_tool(
         name=PROJECT_SKILL_TOOL,
         description=(
-            "Load one Project Skill after observing enough code to identify a reusable project or "
-            "subsystem architecture. Name the stable architecture rather than the current feature, "
-            "operation, or defect, and convert concrete symbols into generic roles. Example: observations "
-            "of Function.iter_return_stmts, child nodes, and recursion-container constants become "
-            "project_type='concrete syntax tree parser' and architecture_signature='tree node objects "
-            "expose recursive traversal helpers governed by descent predicates'."
+            "Complete repository orientation and load the Project Skill stored for this exact repository. "
+            "The framework resolves the repository identity; provide only the static structure observed "
+            "before the issue is revealed."
         ),
         properties={
-            "project_type": {"type": "string", "description": "Short reusable architecture type, such as concrete syntax tree parser, configuration-driven command application, or model-template response service."},
-            "architecture_signature": {"type": "string", "description": "One generic sentence describing stable role separation and information flow for this type."},
-            "component_roles": {"type": "array", "items": {"type": "string"}, "description": "Generic architectural role labels inferred from observed components."},
-            "responsibility_boundary": {"type": "string", "description": "Responsibility, data, state, or control boundary under investigation."},
+            "repository_summary": {
+                "type": "string",
+                "description": "Concise evidence-based summary of the repository's observed structure.",
+            },
+            "component_roles": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Observed components and their stable responsibilities.",
+            },
+            "responsibility_boundaries": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Observed data, state, control, dispatch, or adaptation handoffs.",
+            },
         },
-        required=["project_type", "architecture_signature", "component_roles", "responsibility_boundary"],
+        required=["repository_summary", "component_roles", "responsibility_boundaries"],
     )
 
 

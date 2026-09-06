@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from evolutefl.skills.schema import DimensionSkill, UnsupportedLegacySkillError
+from evolutefl.skills.schema import (
+    DimensionSkill,
+    UnsupportedLegacySkillError,
+    normalize_repo_id,
+)
 
 
 def test_new_project_skill_schema_round_trip() -> None:
@@ -31,6 +35,30 @@ def test_new_project_skill_schema_round_trip() -> None:
         "Configuration adapters connect external options to normalized internal state."
     ]
     assert "scope" not in skill.compact_dict()
+
+
+def test_repo_project_skill_does_not_require_trigger() -> None:
+    skill = DimensionSkill.from_dict({
+        "skill_id": "project_skill_pallets_click",
+        "status": "active",
+        "version": 1,
+        "skill_type": "project_skill",
+        "repo_id": "Pallets/Click",
+        "skill": {
+            "title": "Click repository architecture",
+            "knowledge": ["Commands are resolved before callbacks are invoked."],
+        },
+    })
+
+    assert skill.repo_id == "pallets/click"
+    assert skill.to_dict()["repo_id"] == "pallets/click"
+    assert "trigger" not in skill.to_dict()["skill"]
+
+
+def test_swesmith_snapshot_normalizes_to_upstream_repository() -> None:
+    assert normalize_repo_id(
+        "swesmith/pandas-dev__pandas.95280573"
+    ) == "pandas-dev/pandas"
 
 
 def test_legacy_project_and_strategy_types_are_mapped() -> None:

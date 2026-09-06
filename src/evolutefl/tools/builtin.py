@@ -191,7 +191,8 @@ def _grep_literal_with_ripgrep(
             parts = line.rstrip("\n").split(":", 2)
             if len(parts) != 3 or not parts[1].isdigit():
                 continue
-            relative_path = parts[0].removeprefix("./").replace("\\", "/")
+            relative_path = parts[0][2:] if parts[0].startswith("./") else parts[0]
+            relative_path = relative_path.replace("\\", "/")
             if any(part in SKIP_DIRS for part in Path(relative_path).parts):
                 continue
             if not glob and Path(relative_path).suffix.lower() not in TEXT_EXTENSIONS:

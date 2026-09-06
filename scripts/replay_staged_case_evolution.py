@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_dir=target_case_dir,
                 reflect_success=args.reflect_success,
                 reflect_failure=args.reflect_failure,
+                fault_only=args.fault_only,
             )
             rebuild = make_skill_bank(config).rebuild_embeddings() if args.rebuild_embeddings_after_case else None
             summary = {
@@ -109,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         "sample_size": len(cases),
         "provider": args.provider,
         "model": args.model,
+        "fault_only": args.fault_only,
         "cases": summaries,
         "active_skill_count": len(make_skill_bank(config).active_skills()),
     }
@@ -151,6 +153,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embedding-min-score", type=float, default=0.48)
     parser.add_argument("--reset-target", action="store_true")
     parser.add_argument("--rebuild-embeddings-after-case", action="store_true")
+    parser.add_argument(
+        "--fault-only",
+        action="store_true",
+        help="Replay only Fault reflection; skip Project Builder and Strategy reflection.",
+    )
     parser.add_argument(
         "--reflect-success",
         action="store_true",

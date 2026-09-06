@@ -46,10 +46,11 @@ def skill_embedding_text(skill: DimensionSkill) -> str:
             f"architecture_signature: {skill.trigger}",
             "knowledge:\n- " + "\n- ".join(skill.knowledge_texts),
         ]
-    elif skill.skill_type == "issue_skill":
+    elif skill.skill_type == "fault_skill":
         parts = [
-            "skill_type: issue_skill",
-            f"issue_family: {skill.value}",
+            "skill_type: fault_skill",
+            f"fault_family: {skill.fault_family}",
+            f"fault_subtype: {skill.fault_subtype}",
             f"title: {skill.title}",
             f"applicability_trigger: {skill.trigger}",
             "knowledge:\n- " + "\n- ".join(skill.knowledge_texts),

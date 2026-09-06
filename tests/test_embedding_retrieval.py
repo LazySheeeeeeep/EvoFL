@@ -232,18 +232,19 @@ def test_project_candidate_recall_defaults_to_selector_gated_top_candidates(tmpd
     assert "project_skill_candidate_min_score=0.0" in candidates["skill_search_trace"]["notes"]
 
 
-def test_issue_candidate_recall_can_be_broader_than_runtime_injection(tmpdir) -> None:
+def test_fault_catalog_is_family_scoped_and_does_not_use_embedding(tmpdir) -> None:
     tmp_path = Path(str(tmpdir))
     bank_path = tmp_path / "skills.jsonl"
     cache_path = tmp_path / "embeddings.jsonl"
     bank_path.write_text(
         json.dumps(
             {
-                "skill_id": "issue_config_boundary_v1",
+                "skill_id": "fault_config_boundary_v1",
                 "status": "active",
                 "version": 1,
-                "skill_type": "issue_skill",
-                "value": "configuration_boundary_mismatch",
+                "skill_type": "fault_skill",
+                "fault_family": "transformation_representation",
+                "fault_subtype": "configuration_boundary_mismatch",
                 "skill": {
                     "title": "Configuration boundary mismatch",
                     "trigger": "Use when configuration values diverge before backend consumption.",
@@ -259,19 +260,18 @@ def test_issue_candidate_recall_can_be_broader_than_runtime_injection(tmpdir) ->
         retrieval_mode="embedding",
         embedding_client=FakeEmbeddingClient(),
         embedding_cache_path=cache_path,
-        issue_skill_embedding_min_score=1.1,
-        issue_skill_candidate_min_score=0.0,
     )
 
-    runtime = bank.search_for_stage("issue_skill", "config schema system", limit=1)
-    candidates = bank.search_issue_candidates("unrelated repository behavior", limit=3)
+    candidates = bank.fault_catalog("transformation_representation")
+    unrelated = bank.fault_catalog("algorithm_computation")
 
-    assert runtime["matched_skills"] == []
     assert [item["skill_id"] for item in candidates["candidate_skills"]] == [
-        "issue_config_boundary_v1"
+        "fault_config_boundary_v1"
     ]
-    assert candidates["skill_search_trace"]["retrieval_mode"] == "embedding_issue_candidate_recall_v1"
-    assert "issue_skill_candidate_min_score=0.0" in candidates["skill_search_trace"]["notes"]
+    assert candidates["candidate_skills"][0]["fault_subtype"] == "configuration_boundary_mismatch"
+    assert "knowledge" not in candidates["candidate_skills"][0]
+    assert candidates["skill_search_trace"]["retrieval_mode"] == "llm_full_family_catalog_v1"
+    assert unrelated["candidate_skills"] == []
 
 
 def test_apply_update_warms_embedding_cache_when_client_configured(tmpdir) -> None:
@@ -368,7 +368,7 @@ def test_rebuild_embeddings_prunes_stale_skill_versions(tmpdir) -> None:
     result = bank.rebuild_embeddings()
     cache_records = [json.loads(line) for line in cache_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    assert result["active_skill_count"] == 1
+    assert result["embedded_project_skill_count"] == 1
     assert result["embedding_cache"]["pruned_count"] == 1
     assert len(cache_records) == 1
     assert cache_records[0]["skill_id"] == "project_config_adapter_v1"

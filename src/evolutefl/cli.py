@@ -12,6 +12,7 @@ from evolutefl.json_utils import read_json
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.reflection import run_case_evolution
 from evolutefl.skills import make_skill_bank
+from evolutefl.skills.fault_taxonomy import FAULT_FAMILIES
 from evolutefl.tools import ToolRegistry, register_builtin_tools
 
 
@@ -39,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_config_arg(search)
     add_embedding_override_args(search)
     search.add_argument("--repo", required=True)
-    search.add_argument("--skill-type", choices=["project_skill", "strategy_skill"], required=True)
+    search.add_argument("--skill-type", choices=["project_skill", "fault_skill", "strategy_skill"], required=True)
+    search.add_argument("--fault-family", choices=list(FAULT_FAMILIES))
     add_issue_args(search)
     search.set_defaults(func=cmd_search_skills_preview)
 
@@ -114,6 +116,10 @@ def cmd_search_skills_preview(args: argparse.Namespace) -> Any:
     issue = read_issue(args)
     bank = make_skill_bank(config)
     query = f"{args.repo}\n{issue}"
+    if args.skill_type == "fault_skill":
+        if not args.fault_family:
+            raise ValueError("--fault-family is required for fault_skill preview.")
+        return bank.fault_catalog(args.fault_family)
     return bank.search_for_stage(args.skill_type, query, limit=1)
 
 

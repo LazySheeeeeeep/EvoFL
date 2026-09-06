@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         configure_empty_skill_bank(config, out_dir)
     if args.disable_skill_type:
         enabled = set(config.setdefault("skill_bank", {}).get("enabled_skill_types") or (
-            "project_skill", "issue_skill", "strategy_skill"
+            "project_skill", "fault_skill", "strategy_skill"
         ))
         enabled.difference_update(args.disable_skill_type)
         config["skill_bank"]["enabled_skill_types"] = sorted(enabled)
@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     skill_bank = make_skill_bank(config)
     client = OpenAICompatibleClient.from_config(config["llm"])
     summaries: list[dict[str, Any]] = []
-    stopped_after_issue_skill_target = False
+    stopped_after_fault_skill_target = False
     for index, case in enumerate(cases, start=1):
         instance_id = case["instance_id"]
         previous_summary = previous_by_id.get(instance_id)
@@ -168,6 +168,10 @@ def main(argv: list[str] | None = None) -> int:
                     }),
                     "skill_updates": evolution.get("skill_updates", {}),
                     "project_skill_decision": (evolution.get("project_knowledge") or {}).get("decision"),
+                    "runtime_fault_family": evolution.get("runtime_fault_family"),
+                    "reflector_fault_family": evolution.get("reflector_fault_family"),
+                    "fault_family_consistent": evolution.get("fault_family_consistent"),
+                    "fault_target_selection": evolution.get("fault_target_selection", {}),
                     "applied_updates": [
                         {
                             "operation": update.get("operation"),
@@ -193,12 +197,12 @@ def main(argv: list[str] | None = None) -> int:
                 summary["evolution_status"] = "failed"
         summaries.append(summary)
         write_json(out_dir / "progress_summary.json", {"cases": summaries})
-        if args.stop_after_issue_skills:
-            issue_skill_count = sum(
-                1 for skill in skill_bank.active_skills() if skill.skill_type == "issue_skill"
+        if args.stop_after_fault_skills:
+            fault_skill_count = sum(
+                1 for skill in skill_bank.active_skills() if skill.skill_type == "fault_skill"
             )
-            if issue_skill_count >= args.stop_after_issue_skills:
-                stopped_after_issue_skill_target = True
+            if fault_skill_count >= args.stop_after_fault_skills:
+                stopped_after_fault_skill_target = True
                 break
 
     final = {
@@ -212,8 +216,8 @@ def main(argv: list[str] | None = None) -> int:
             "max_runtime_seconds": config["explorer"].get("max_runtime_seconds"),
         },
         "cases": summaries,
-        "stopped_after_issue_skill_target": stopped_after_issue_skill_target,
-        "issue_skill_target": args.stop_after_issue_skills or None,
+        "stopped_after_fault_skill_target": stopped_after_fault_skill_target,
+        "fault_skill_target": args.stop_after_fault_skills or None,
     }
     final["report"] = build_report(summaries, skill_bank)
     write_json(out_dir / "summary.json", final)
@@ -250,8 +254,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--reflect-success",
         action="store_true",
         help=(
-            "Allow completed Top-5 hits to contribute Project Skills. "
-            "Strategy Skills remain restricted to corrective misses."
+            "Legacy compatibility flag. V3 always reflects completed Top-5 hits into Fault learning."
         ),
     )
     parser.add_argument("--prepare-only", action="store_true")
@@ -272,10 +275,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rebuild-embeddings-after-case", action="store_true")
     parser.add_argument(
-        "--stop-after-issue-skills",
+        "--stop-after-fault-skills",
         type=int,
         default=0,
-        help="Stop training after this many active Issue Skills have been created or rewritten into the bank.",
+        help="Stop training after this many active Fault Skills have been created or rewritten into the bank.",
     )
     parser.add_argument("--skip-evolution", action="store_true")
     parser.add_argument(
@@ -286,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable-skill-type",
         action="append",
-        choices=["project_skill", "issue_skill", "strategy_skill"],
+        choices=["project_skill", "fault_skill", "strategy_skill"],
         default=[],
         help="Disable one Skill type while leaving the remaining SkillBank active.",
     )
@@ -352,7 +355,7 @@ def select_cases(sample_size: int, seed: int, dataset_name: str, split: str, pre
     for row in rows:
         image = row.get("image_name", "")
         # V3 reveals the issue only after repository orientation. A blank
-        # problem_statement cannot exercise its Issue Skill stage and would
+        # problem_statement cannot exercise its Fault Skill stage and would
         # turn the run into undirected repository browsing.
         if not str(row.get("problem_statement") or "").strip():
             continue
@@ -580,6 +583,10 @@ def load_resume_summaries(out_dir: Path, cases: list[dict[str, Any]]) -> dict[st
                 "updated_skill_ids": evolution.get("updated_skill_ids", []),
                 "updated_skill_types": evolution.get("updated_skill_types", []),
                 "skill_updates": evolution.get("skill_updates", {}),
+                "runtime_fault_family": evolution.get("runtime_fault_family"),
+                "reflector_fault_family": evolution.get("reflector_fault_family"),
+                "fault_family_consistent": evolution.get("fault_family_consistent"),
+                "fault_target_selection": evolution.get("fault_target_selection", {}),
             },
             "embedding_rebuild": {"recovered": True},
         }
@@ -636,8 +643,12 @@ def read_skill_usage(path: Path) -> dict[str, Any]:
     usage = {
         "project_skill_attempted": False,
         "project_skill_id": None,
-        "issue_skill_attempted": False,
-        "issue_skill_id": None,
+        "fault_skill_attempted": False,
+        "fault_skill_id": None,
+        "fault_family": None,
+        "fault_catalog_count": 0,
+        "fault_selector_selected": False,
+        "fault_validator_applicable": False,
         "strategy_skill_attempted": False,
         "strategy_skill_id": None,
         "forced_finish": False,
@@ -656,10 +667,19 @@ def read_skill_usage(path: Path) -> dict[str, Any]:
             usage["project_skill_attempted"] = True
         elif event_name == "project_skill_loaded":
             usage["project_skill_id"] = event.get("loaded_skill_id")
-        elif event_name == "issue_skill_request":
-            usage["issue_skill_attempted"] = True
-        elif event_name == "issue_skill_loaded":
-            usage["issue_skill_id"] = event.get("loaded_skill_id")
+        elif event_name == "fault_skill_request":
+            usage["fault_skill_attempted"] = True
+            usage["fault_family"] = (event.get("request") or {}).get("fault_family")
+        elif event_name == "fault_skill_loaded":
+            usage["fault_skill_id"] = event.get("loaded_skill_id")
+            trace = event.get("search_trace") or {}
+            usage["fault_catalog_count"] = int(trace.get("catalog_count") or 0)
+            selector_id = (trace.get("selector") or {}).get("selected_skill_id")
+            usage["fault_selector_selected"] = selector_id not in {None, "", "none", "null"}
+            validator = trace.get("validator") or {}
+            usage["fault_validator_applicable"] = bool(
+                validator.get("applicable") or validator.get("approved")
+            )
         elif event_name == "strategy_skill_request":
             usage["strategy_skill_attempted"] = True
         elif event_name == "strategy_skill_loaded":
@@ -667,7 +687,7 @@ def read_skill_usage(path: Path) -> dict[str, Any]:
         elif event_name in {"forced_finish", "deterministic_finish"}:
             usage["forced_finish"] = True
     usage["any_skill_loaded"] = bool(
-        usage["project_skill_id"] or usage["issue_skill_id"] or usage["strategy_skill_id"]
+        usage["project_skill_id"] or usage["fault_skill_id"] or usage["strategy_skill_id"]
     )
     return usage
 
@@ -725,6 +745,23 @@ def build_report(
         }
 
     active_skills = skill_bank.active_skills()
+    attempted_fault = [
+        item for item in summaries
+        if (item.get("skill_usage") or {}).get("fault_skill_attempted")
+    ]
+    catalog_nonempty = [
+        item for item in attempted_fault
+        if int((item.get("skill_usage") or {}).get("fault_catalog_count") or 0) > 0
+    ]
+    selector_selected = [
+        item for item in catalog_nonempty
+        if (item.get("skill_usage") or {}).get("fault_selector_selected")
+    ]
+    classified_evolution = [
+        item for item in summaries
+        if (item.get("evolution") or {}).get("runtime_fault_family")
+        and (item.get("evolution") or {}).get("reflector_fault_family")
+    ]
     evolution_decisions: Counter[str] = Counter()
     evolution_operations: Counter[str] = Counter()
     for item in summaries:
@@ -732,12 +769,11 @@ def build_report(
         project_decision = evolution.get("project_skill_decision")
         if project_decision:
             evolution_decisions[f"project_skill:{project_decision}"] += 1
+            evolution_operations[_decision_operation(project_decision)] += 1
         for skill_type, update in (evolution.get("skill_updates") or {}).items():
             if isinstance(update, dict) and update.get("decision"):
                 evolution_decisions[f"{skill_type}:{update['decision']}"] += 1
-        for update in evolution.get("applied_updates") or []:
-            if isinstance(update, dict) and update.get("operation"):
-                evolution_operations[str(update["operation"])] += 1
+                evolution_operations[_decision_operation(str(update["decision"]))] += 1
     return {
         "case_count": len(summaries),
         "completed_count": sum(item.get("explorer_status") == "completed" for item in summaries),
@@ -764,8 +800,8 @@ def build_report(
                 bool((item.get("skill_usage") or {}).get("project_skill_id"))
                 for item in summaries
             ),
-            "issue_skill_loaded_count": sum(
-                bool((item.get("skill_usage") or {}).get("issue_skill_id"))
+            "fault_skill_loaded_count": sum(
+                bool((item.get("skill_usage") or {}).get("fault_skill_id"))
                 for item in summaries
             ),
             "strategy_skill_loaded_count": sum(
@@ -774,6 +810,39 @@ def build_report(
             ),
             "with_any_skill": subgroup(with_skill),
             "without_any_skill": subgroup(without_skill),
+            "fault_catalog_nonempty_rate": (
+                len(catalog_nonempty) / len(attempted_fault) if attempted_fault else 0.0
+            ),
+            "fault_selector_pass_rate": (
+                len(selector_selected) / len(catalog_nonempty) if catalog_nonempty else 0.0
+            ),
+            "fault_validator_pass_rate": (
+                sum(
+                    bool((item.get("skill_usage") or {}).get("fault_validator_applicable"))
+                    for item in selector_selected
+                ) / len(selector_selected)
+                if selector_selected else 0.0
+            ),
+        },
+        "fault_family_statistics": {
+            "runtime_distribution": dict(Counter(
+                str((item.get("skill_usage") or {}).get("fault_family"))
+                for item in attempted_fault
+                if (item.get("skill_usage") or {}).get("fault_family")
+            )),
+            "reflector_distribution": dict(Counter(
+                str((item.get("evolution") or {}).get("reflector_fault_family"))
+                for item in summaries
+                if (item.get("evolution") or {}).get("reflector_fault_family")
+            )),
+            "classification_pair_count": len(classified_evolution),
+            "classification_consistency_rate": (
+                sum(
+                    bool((item.get("evolution") or {}).get("fault_family_consistent"))
+                    for item in classified_evolution
+                ) / len(classified_evolution)
+                if classified_evolution else 0.0
+            ),
         },
         "forced_finish_count": sum(
             bool((item.get("skill_usage") or {}).get("forced_finish"))
@@ -782,7 +851,7 @@ def build_report(
         "active_skill_count": len(active_skills),
         "active_skill_count_by_type": {
             skill_type: sum(skill.skill_type == skill_type for skill in active_skills)
-            for skill_type in ("project_skill", "issue_skill", "strategy_skill")
+            for skill_type in ("project_skill", "fault_skill", "strategy_skill")
         },
         "active_skill_ids": [skill.skill_id for skill in active_skills],
         "evolution_decision_counts": dict(evolution_decisions),
@@ -797,6 +866,15 @@ def _parse_max_steps_arg(value: str) -> int | None:
     if parsed <= 0:
         return None
     return parsed
+
+
+def _decision_operation(decision: str) -> str:
+    return {
+        "create_new": "create",
+        "rewrite_existing": "rewrite",
+        "preserve_existing": "preserve",
+        "no_update": "no_update",
+    }.get(str(decision or ""), str(decision or "unknown"))
 
 
 def _safe_name(value: str) -> str:

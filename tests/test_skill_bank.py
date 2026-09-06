@@ -296,6 +296,42 @@ def test_rewrite_rejects_a_new_semantic_identity(tmpdir) -> None:
             }
         )
     except ValueError as exc:
-        assert "preserve the target skill value" in str(exc)
+        assert "preserve the target semantic identity" in str(exc)
     else:
         raise AssertionError("Expected rewrite with a new semantic identity to fail.")
+
+
+def test_project_skill_uses_exact_repo_identity_and_independent_add(tmpdir) -> None:
+    path = Path(str(tmpdir)) / "skills.jsonl"
+    path.write_text("", encoding="utf-8")
+    bank = SkillBankV0(path)
+
+    created = bank.apply_project_update({
+        "decision": "create_new",
+        "repo_id": "Pallets/Click",
+        "skill": {
+            "repo_id": "pallets/click",
+            "title": "Click repository architecture",
+            "knowledge": ["Command declarations become parser state before callback invocation."],
+        },
+    })
+
+    assert created["action"] == "create_new"
+    assert bank.search_project_for_repo("https://github.com/pallets/click.git")[
+        "matched_skills"
+    ][0]["repo_id"] == "pallets/click"
+    assert bank.search_project_for_repo("pallets/flask")["matched_skills"] == []
+
+    added = bank.apply_project_update({
+        "decision": "add",
+        "repo_id": "pallets/click",
+        "knowledge_to_add": [
+            "Context carries resolved parameters from parsing into command dispatch."
+        ],
+    })
+
+    assert added["action"] == "add_project_knowledge"
+    current = bank.get_project_skill("pallets/click")
+    assert current is not None
+    assert len(current["knowledge"]) == 2
+    assert "trigger" not in current

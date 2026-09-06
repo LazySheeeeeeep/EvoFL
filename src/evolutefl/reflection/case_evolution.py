@@ -57,6 +57,7 @@ def run_case_evolution(
     output_dir: str | Path | None = None,
     reflect_success: bool = False,
     reflect_failure: bool = True,
+    fault_only: bool = False,
 ) -> dict[str, Any]:
     if str((config.get("explorer") or {}).get("workflow_version") or "v2").lower() == "v3":
         from .v3_evolution import run_v3_case_evolution
@@ -66,6 +67,7 @@ def run_case_evolution(
             force=force, ground_truth_patch=ground_truth_patch, ground_truth_functions=ground_truth_functions,
             ground_truth_locations=ground_truth_locations, output_dir=output_dir,
             reflect_success=reflect_success, reflect_failure=reflect_failure,
+            fault_only=fault_only,
         )
     case_dir = Path(case_run_dir)
     out_dir = Path(output_dir) if output_dir else case_dir / "case_evolution"

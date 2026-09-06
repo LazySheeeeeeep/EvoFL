@@ -9,7 +9,7 @@ from .schema import SKILL_TYPES, DimensionSkill
 
 DEFAULT_SKILL_TYPE_QUOTA = {
     "project_skill": 1,
-    "issue_skill": 1,
+    "fault_skill": 1,
     "strategy_skill": 1,
 }
 

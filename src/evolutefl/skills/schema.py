@@ -5,8 +5,9 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .fault_taxonomy import validate_fault_family
 
-SKILL_TYPES = ("project_skill", "issue_skill", "strategy_skill")
+SKILL_TYPES = ("project_skill", "fault_skill", "strategy_skill")
 SKILL_STATUSES = ("active", "superseded", "rejected")
 MIN_KNOWLEDGE_ITEMS = 2
 MAX_KNOWLEDGE_ITEMS = 4
@@ -28,7 +29,6 @@ FINAL_MAX_STATEMENT_CHARS = 360
 LEGACY_SKILL_TYPE_MAP = {
     "project_type": "project_skill",
     "strategy_type": "strategy_skill",
-    "issue_type": "issue_skill",
 }
 
 
@@ -43,7 +43,7 @@ def slugify(value: str, fallback: str = "skill") -> str:
 
 @dataclass
 class DimensionSkill:
-    """A compact Project, Issue, or Strategy skill card.
+    """A compact Project, Fault, or Strategy skill card.
 
     The class name is retained for import compatibility. New serialized records
     use ``skill_type`` and contain one of the supported V3 skill types.
@@ -57,11 +57,20 @@ class DimensionSkill:
     title: str
     trigger: str
     knowledge: list[Any]
+    repo_id: str | None = None
+    fault_family: str | None = None
+    fault_subtype: str | None = None
 
     def __post_init__(self) -> None:
-        # Issue knowledge has stable numeric addresses for one-item edits.
-        # Other Skill types retain their compact string-list representation.
         self.knowledge = normalize_skill_knowledge(self.knowledge, self.skill_type)
+        if self.skill_type == "project_skill":
+            self.repo_id = normalize_repo_id(self.repo_id) if self.repo_id else None
+        if self.skill_type == "fault_skill":
+            self.fault_family = validate_fault_family(self.fault_family)
+            self.fault_subtype = str(self.fault_subtype or self.value).strip()
+            if not self.fault_subtype:
+                raise ValueError("Fault Skill requires fault_subtype.")
+            self.value = self.fault_subtype
 
     @property
     def knowledge_texts(self) -> list[str]:
@@ -86,13 +95,24 @@ class DimensionSkill:
         skill_type = str(normalized.get("skill_type") or "")
         if skill_type not in SKILL_TYPES:
             raise ValueError(f"Invalid skill_type: {skill_type!r}")
-        value = str(normalized.get("value") or "unknown")
+        fault_family = normalized.get("fault_family")
+        fault_subtype = str(normalized.get("fault_subtype") or "").strip() or None
+        repo_id = (
+            normalize_repo_id(normalized.get("repo_id"))
+            if skill_type == "project_skill" and normalized.get("repo_id")
+            else None
+        )
+        value = str(
+            fault_subtype
+            if skill_type == "fault_skill"
+            else repo_id or normalized.get("value") or "unknown"
+        )
         skill_block = normalized.get("skill") or {}
         title = str(skill_block.get("title") or "").strip()
         trigger = str(skill_block.get("trigger") or "").strip()
         knowledge = normalize_skill_knowledge(skill_block.get("knowledge"), skill_type)
-        if not title or not trigger or not knowledge:
-            raise ValueError(f"Skill {skill_id} missing title/trigger/knowledge.")
+        if not title or not knowledge or (skill_type != "project_skill" and not trigger):
+            raise ValueError(f"Skill {skill_id} missing required title/trigger/knowledge.")
         return cls(
             skill_id=skill_id,
             status=status,
@@ -102,21 +122,33 @@ class DimensionSkill:
             title=title,
             trigger=trigger,
             knowledge=knowledge,
+            repo_id=repo_id,
+            fault_family=str(fault_family or "").strip() or None,
+            fault_subtype=fault_subtype,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        skill_payload = {
+            "title": self.title,
+            "knowledge": self.knowledge,
+        }
+        if self.skill_type != "project_skill":
+            skill_payload["trigger"] = self.trigger
+        payload = {
             "skill_id": self.skill_id,
             "status": self.status,
             "version": self.version,
             "skill_type": self.skill_type,
-            "value": self.value,
-            "skill": {
-                "title": self.title,
-                "trigger": self.trigger,
-                "knowledge": self.knowledge,
-            },
+            "skill": skill_payload,
         }
+        if self.skill_type == "fault_skill":
+            payload["fault_family"] = self.fault_family
+            payload["fault_subtype"] = self.fault_subtype
+        elif self.skill_type == "project_skill" and self.repo_id:
+            payload["repo_id"] = self.repo_id
+        else:
+            payload["value"] = self.value
+        return payload
 
     def compact_dict(
         self,
@@ -128,17 +160,80 @@ class DimensionSkill:
         """Return the runtime view used by Explorer and Reflector."""
 
         del score, match_reasons
-        knowledge: list[Any] = self.knowledge
-        if self.skill_type == "issue_skill" and not include_knowledge_ids:
-            knowledge = self.knowledge_texts
-        return {
+        del include_knowledge_ids
+        payload = {
             "skill_id": self.skill_id,
             "skill_type": self.skill_type,
-            "value": self.value,
             "title": self.title,
-            "trigger": self.trigger,
-            "knowledge": knowledge,
+            "knowledge": self.knowledge_texts,
         }
+        if self.skill_type == "fault_skill":
+            payload["fault_family"] = self.fault_family
+            payload["fault_subtype"] = self.fault_subtype
+        elif self.skill_type == "project_skill" and self.repo_id:
+            payload["repo_id"] = self.repo_id
+        else:
+            payload["value"] = self.value
+        if self.skill_type != "project_skill":
+            payload["trigger"] = self.trigger
+        return payload
+
+
+def normalize_repo_id(value: Any) -> str:
+    """Return the stable repository identity used by Project Skills."""
+
+    text = str(value or "").strip().replace("\\", "/")
+    for prefix in ("https://github.com/", "http://github.com/", "git@github.com:"):
+        if text.lower().startswith(prefix):
+            text = text[len(prefix):]
+            break
+    text = text.removesuffix(".git").strip("/")
+    # SWE-smith identifies a repository snapshot as
+    # ``swesmith/owner__repository.<commit>``. Project knowledge belongs to the
+    # upstream repository, not to one generated snapshot.
+    if text.lower().startswith("swesmith/"):
+        synthetic = text.split("/", 1)[1]
+        owner_repo, separator, _commit = synthetic.rpartition(".")
+        if separator and "__" in owner_repo:
+            owner, repository = owner_repo.split("__", 1)
+            text = f"{owner}/{repository}"
+    parts = [part for part in text.split("/") if part]
+    if len(parts) < 2:
+        raise ValueError(f"repo_id must use owner/repository form, got {value!r}.")
+    return "/".join(parts[-2:]).lower()
+
+
+def validate_project_knowledge(value: Any) -> list[str]:
+    """Validate repository-specific static facts without a shared Skill grammar."""
+
+    knowledge = normalize_knowledge(value)
+    if not knowledge:
+        raise ValueError("Project knowledge requires at least one statement.")
+    return knowledge
+
+
+def validate_project_create(raw: Any, *, expected_repo_id: str) -> dict[str, Any]:
+    """Validate the independent Project create protocol."""
+
+    if not isinstance(raw, dict):
+        raise ValueError("Project create payload must be an object.")
+    repo_id = normalize_repo_id(raw.get("repo_id") or expected_repo_id)
+    if repo_id != normalize_repo_id(expected_repo_id):
+        raise ValueError("Project create repo_id must match the current repository.")
+    title = str(raw.get("title") or "").strip()
+    if not title:
+        raise ValueError("Project create requires title.")
+    return {
+        "repo_id": repo_id,
+        "title": title,
+        "knowledge": validate_project_knowledge(raw.get("knowledge")),
+    }
+
+
+def validate_project_add(value: Any) -> list[str]:
+    """Validate knowledge additions in the independent Project add protocol."""
+
+    return validate_project_knowledge(value)
 
 def migrate_legacy_skill(record: dict[str, Any]) -> dict[str, Any]:
     normalized = deepcopy(record)
@@ -167,17 +262,16 @@ def migrate_legacy_skill(record: dict[str, Any]) -> dict[str, Any]:
     skill_type = LEGACY_SKILL_TYPE_MAP.get(raw_type, raw_type)
     if skill_type not in SKILL_TYPES:
         raise UnsupportedLegacySkillError(
-            f"Legacy skill type {raw_type!r} is not part of the project/strategy SkillBank."
+            f"Legacy skill type {raw_type!r} is not part of the Project/Fault/Strategy SkillBank."
         )
     normalized["skill_type"] = skill_type
-    if skill_type == "issue_skill":
-        skill_block["knowledge"] = normalize_issue_knowledge(skill_block.get("knowledge"))
     # Historical scope values are accepted on read but are not part of the
     # current two-type Skill schema.
     normalized.pop("scope", None)
     normalized.pop("dimension", None)
 
-    normalized.setdefault("value", "unknown")
+    if skill_type != "fault_skill":
+        normalized.setdefault("value", "unknown")
     # Old records may contain a separately maintained retrieval_text. It is
     # intentionally discarded: title, trigger, and knowledge are now the
     # canonical retrieval document and are rewritten atomically.
@@ -227,40 +321,8 @@ def _knowledge_item_text(item: Any) -> str:
     return ""
 
 
-def normalize_issue_knowledge(value: Any) -> list[dict[str, Any]]:
-    """Normalize Issue knowledge into stable numeric, unordered list items.
-
-    Historical string lists are accepted and assigned IDs in their original
-    order. Persisted Issue cards retain those IDs, so later case reflections
-    can replace or remove a proposition without relying on text matching.
-    """
-
-    raw_items = value if isinstance(value, list) else [value]
-    normalized: list[dict[str, Any]] = []
-    used_ids: set[int] = set()
-    next_id = 1
-    for raw in raw_items:
-        text = _knowledge_item_text(raw).strip()
-        if not text:
-            continue
-        raw_id = raw.get("id") if isinstance(raw, dict) else None
-        try:
-            item_id = int(raw_id)
-        except (TypeError, ValueError):
-            item_id = 0
-        if item_id < 1 or item_id in used_ids:
-            while next_id in used_ids:
-                next_id += 1
-            item_id = next_id
-        used_ids.add(item_id)
-        next_id = max(next_id, item_id + 1)
-        normalized.append({"id": item_id, "text": text})
-    return normalized
-
-
 def normalize_skill_knowledge(value: Any, skill_type: str) -> list[Any]:
-    if skill_type == "issue_skill":
-        return normalize_issue_knowledge(value)
+    del skill_type
     return normalize_knowledge(value)
 
 
@@ -283,16 +345,10 @@ def validate_atomic_knowledge(value: Any) -> list[str]:
     return knowledge
 
 
-def validate_issue_knowledge(value: Any) -> list[dict[str, Any]]:
-    """Validate Issue propositions without imposing a fixed item count.
-
-    Item IDs are normalized rather than supplied by the model on creation.
-    The per-case update protocol ensures a reflection edits at most one item.
-    """
-
-    knowledge = normalize_issue_knowledge(value)
+def validate_fault_knowledge(value: Any) -> list[str]:
+    knowledge = normalize_knowledge(value)
     if not knowledge:
-        raise ValueError("Issue Skill requires at least one knowledge proposition.")
+        raise ValueError("Fault Skill requires at least one knowledge statement.")
     return knowledge
 
 
@@ -308,11 +364,25 @@ def validate_portable_skill_card(raw: Any, *, skill_type: str) -> dict[str, Any]
         raise ValueError(f"Unsupported skill type: {skill_type!r}")
     if not isinstance(raw, dict):
         raise ValueError("Finalized skill must be an object.")
-    value = str(raw.get("value") or "").strip()
     title = str(raw.get("title") or "").strip()
     trigger = str(raw.get("trigger") or "").strip()
-    if not value or not title or not trigger:
-        raise ValueError("Finalized skill requires value, title, and trigger.")
+    if not title or not trigger:
+        raise ValueError("Finalized skill requires title and trigger.")
+    if skill_type == "fault_skill":
+        family = validate_fault_family(raw.get("fault_family"))
+        subtype = str(raw.get("fault_subtype") or "").strip()
+        if not subtype:
+            raise ValueError("Finalized Fault Skill requires fault_subtype.")
+        return {
+            "fault_family": family,
+            "fault_subtype": subtype,
+            "title": title,
+            "trigger": trigger,
+            "knowledge": validate_fault_knowledge(raw.get("knowledge")),
+        }
+    value = str(raw.get("value") or "").strip()
+    if not value:
+        raise ValueError("Finalized skill requires value.")
     if len(trigger) > FINAL_MAX_TRIGGER_CHARS:
         raise ValueError(
             f"Finalized skill trigger exceeds {FINAL_MAX_TRIGGER_CHARS} characters."
@@ -338,6 +408,6 @@ def validate_portable_skill_card(raw: Any, *, skill_type: str) -> dict[str, Any]
     }
 
 
-# Preferred public name for the two-type framework. DimensionSkill remains an
+# Preferred public name for the staged Skill framework. DimensionSkill remains an
 # import-compatible alias for historical callers.
 SkillCard = DimensionSkill

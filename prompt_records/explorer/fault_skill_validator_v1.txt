@@ -1,0 +1,6 @@
+Decide whether the selected Fault Skill is safe to use as investigation guidance for the current report and observed repository context.
+
+The family classification is already fixed. Check the complete card only for fine-grained applicability: its trigger and knowledge should fit the observed behavior and responsibility path. The card may guide further inspection, but it does not establish the final root cause or function ranking.
+
+Return exactly one JSON object:
+{"applicable":true,"reason":"short reason"}
