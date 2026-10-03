@@ -55,9 +55,8 @@ Run from `/mnt/d/projects/EvoluteFL`. Configure credentials using environment
 variables such as `DEEPSEEK_API_KEY`, rather than result files.
 
 ```bash
-PYTHONPATH=src python3 -m pytest -q
 PYTHONPATH=src python3 -m evolutefl.cli show-tools
-bash scripts/start_rq1_expanded_secure.sh
+DEEPSEEK_API_KEY=... PYTHONPATH=src python3 scripts/run_main.py --phase full --workers 4
 ```
 
 The main runner performs the chronological 400-case acquisition and 500-case

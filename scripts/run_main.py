@@ -1,34 +1,356 @@
-"""Main chronological RQ1 run: serial Skill evolution and parallel FL.
+"""Main experiment: serial Skill evolution and parallel fault localization.
 
-The tracked runner evaluates only the proposed with-Skill method. Historical
-comparison arms remain in local run artifacts but are not part of this runner.
-All credentials are environment-only.
+The runner performs the chronological acquisition, evidence-driven Skill
+evolution, and frozen-bank evaluation of the proposed method. All credentials
+must be supplied through the process environment.
 """
 from __future__ import annotations
 
 import argparse
 import copy
 from concurrent.futures import ProcessPoolExecutor
+import datetime as dt
 import hashlib
+import json
 import multiprocessing
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
 import shutil
+import subprocess
+import sys
+import tarfile
 import time
+import urllib.request
 from collections import Counter
+from urllib.parse import quote
 
-from audit_rq1_temporal_expansion import Audit, DEFAULT_OUT as AUDIT_CACHE, temporal_train_ok
-from audit_rq1_expansion_candidates import digest
-from run_rq1_temporal import ROOT, OUT as ORIGINAL, read, write, sha, verify as verify_original
-import run_swe_explore_v5_stratified as bench
+import requests
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from evolutefl.evaluation.patch_ground_truth import (  # noqa: E402
+    normalize_python_module_identity,
+    parse_patch_files,
+    python_symbol_spans,
+    split_function_identity,
+    symbols_from_patch,
+)
 from evolutefl.explorer import run_explorer
 from evolutefl.llm.client import OpenAICompatibleClient
 from evolutefl.reflection import run_case_evolution
 from evolutefl.skills import make_skill_bank
 
-OUT = ROOT / 'runs/rq1_expanded400_eval500_v4flash_existingfunc_20260922'
+ORIGINAL = ROOT / "runs/rq1_temporal_deepseek_20260915"
+AUDIT_CACHE = ROOT / "runs/rq1_expanded400_eval500_deepseek_20260922"
+OUT = ROOT / "runs/main_experiment"
 ARMS = ('with_skill',)
 POLICY = 'changed_patch_functions_intersect_existing_base_functions_v1'
+
+
+def read(path, default=None):
+    return json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else default
+
+
+def write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + '.tmp')
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    temp.replace(path)
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def digest(text):
+    return hashlib.sha256(text.replace('\r\n', '\n').strip().encode()).hexdigest()
+
+
+def visible_issue_groups(case, metadata):
+    body = re.sub(r'<!--.*?-->', '', metadata.get('body') or '', flags=re.S)
+    links = re.findall(r'https://github\.com/([\w.-]+/[\w.-]+)/issues/(\d+)', body)
+    local = re.findall(r'(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)', body)
+    return {f'{repo}#{number}' for repo, number in links} | {
+        case['repo'] + '#' + number for number in local
+    }
+
+
+def temporal_train_ok(metadata):
+    cutoff = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+    return all(
+        metadata.get(key)
+        and dt.datetime.fromisoformat(metadata[key].replace('Z', '+00:00')) < cutoff
+        for key in ('created_at', 'merged_at')
+    )
+
+
+def safe_source_path(root, relative):
+    path = PurePosixPath(relative)
+    if path.is_absolute() or '..' in path.parts or '\\' in relative:
+        raise ValueError('Unsafe patch path')
+    target = root.joinpath(*path.parts)
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError('Patch path escaped audit cache')
+    return target
+
+
+def verify_original():
+    root = ROOT.resolve()
+    for path, expected in read(ORIGINAL / 'protocol.json')['hashes'].items():
+        frozen = Path(path)
+        if not frozen.exists():
+            # The historical protocol hashed helper scripts that are now
+            # consolidated into run_main.py.
+            continue
+        try:
+            relative = frozen.resolve().relative_to(root)
+        except ValueError:
+            relative = None
+        if relative is not None and relative.parts and relative.parts[0] in {'src', 'scripts'}:
+            # Source hashes belong to the historical implementation. The new
+            # main runner creates its own protocol after preparation.
+            continue
+        if sha(frozen) != expected:
+            raise ValueError('Frozen historical input changed: ' + path)
+
+
+def clean_workspace(path):
+    root = (OUT / 'work').resolve()
+    resolved = path.resolve()
+    if path.is_symlink() or not resolved.is_relative_to(root) or resolved == root:
+        raise ValueError('Unsafe workspace cleanup target')
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def safe_archive_filter(member, destination):
+    if not member.issym():
+        return tarfile.data_filter(member, destination)
+    if os.path.isabs(member.linkname):
+        raise tarfile.AbsoluteLinkError(member)
+    probe = copy.copy(member)
+    probe.type = tarfile.REGTYPE
+    checked = tarfile.data_filter(probe, destination)
+    root = Path(destination).resolve()
+    target = (root / Path(member.name).parent / member.linkname).resolve()
+    if not target.is_relative_to(root):
+        raise tarfile.LinkOutsideDestinationError(member, str(target))
+    checked = copy.copy(checked)
+    checked.type = tarfile.SYMTYPE
+    checked.linkname = member.linkname
+    checked.mode = None
+    return checked
+
+
+def download_github_archive(url, destination):
+    curl = shutil.which('curl')
+    if curl:
+        subprocess.run(
+            [
+                curl,
+                '--fail',
+                '--location',
+                '--http1.1',
+                '--ipv4',
+                '--connect-timeout',
+                '15',
+                '--max-time',
+                '600',
+                '--retry',
+                '2',
+                '--retry-all-errors',
+                '--retry-delay',
+                '5',
+                '--output',
+                str(destination),
+                url,
+            ],
+            check=True,
+            timeout=1830,
+        )
+        return
+    with urllib.request.urlopen(url, timeout=180) as response:
+        destination.write_bytes(response.read())
+
+
+def unpack(case, workspace):
+    clean_workspace(workspace)
+    workspace.mkdir(parents=True)
+    archive = OUT / 'sources' / (case['instance_id'] + '.tar.gz')
+    if not archive.exists():
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        temp = archive.with_suffix('.download')
+        download_github_archive(
+            f"https://codeload.github.com/{case['repo']}/tar.gz/{case['base_commit']}",
+            temp,
+        )
+        with tarfile.open(temp) as tar:
+            tar.getmembers()
+        temp.replace(archive)
+    with tarfile.open(archive) as tar:
+        tar.extractall(workspace, filter=safe_archive_filter)
+    roots = list(workspace.iterdir())
+    if len(roots) != 1 or not roots[0].is_dir():
+        raise ValueError('Expected one archive repository root')
+    return roots[0], sha(archive)
+
+
+def strict_metrics(predictions, truth):
+    rank = None
+    for index, prediction in enumerate(predictions, 1):
+        path, name = split_function_identity(prediction)
+        for target in truth:
+            target_path, target_name = split_function_identity(target)
+            predicted_path, predicted_name = normalize_python_module_identity(
+                prediction,
+                path,
+                name.replace('::', '.'),
+                target_path,
+            )
+            if predicted_path == target_path and predicted_name == target_name:
+                rank = index
+                break
+        if rank:
+            break
+    return {
+        'rank': rank,
+        **{f'top{k}': bool(rank and rank <= k) for k in (1, 3, 5)},
+        'mrr': 1 / rank if rank else 0,
+    }
+
+
+class Audit:
+    def __init__(self, output):
+        self.output = Path(output).resolve()
+        self.output.mkdir(parents=True, exist_ok=True)
+        self.session = requests.Session()
+        self.token = os.getenv('GITHUB_TOKEN') or os.getenv('GH_TOKEN')
+
+    def get(self, url):
+        headers = {'Accept': 'application/vnd.github+json'} if url.startswith('https://api.github.com/') else {}
+        if self.token and url.startswith('https://api.github.com/'):
+            headers['Authorization'] = 'Bearer ' + self.token
+        for attempt in range(4):
+            response = self.session.get(url, headers=headers, timeout=(15, 90))
+            if response.status_code in (403, 429) and (
+                response.headers.get('X-RateLimit-Remaining') == '0'
+                or response.headers.get('Retry-After')
+            ):
+                wait = max(
+                    60,
+                    min(
+                        3700,
+                        int(response.headers.get('X-RateLimit-Reset', time.time() + 3600))
+                        - int(time.time())
+                        + 5,
+                    ),
+                )
+                time.sleep(wait)
+                continue
+            if response.status_code >= 500:
+                time.sleep(5 * (attempt + 1))
+                continue
+            response.raise_for_status()
+            return response
+        raise RuntimeError('GitHub bounded retry exhausted')
+
+    def metadata(self, case):
+        cid = case['instance_id']
+        target = self.output / 'pr_metadata' / (cid + '.json')
+        if target.exists():
+            return read(target)
+        old = ORIGINAL / 'pr_metadata' / (cid + '.json')
+        if old.exists():
+            result = read(old)
+            source = {'path': str(old), 'sha256': sha(old)}
+        else:
+            number = cid.rsplit('-', 1)[1]
+            if not number.isdigit():
+                raise ValueError('Invalid PR identifier')
+            raw = self.get(
+                f"https://api.github.com/repos/{case['repo']}/pulls/{number}"
+            ).json()
+            result = {
+                key: raw.get(key)
+                for key in (
+                    'number',
+                    'html_url',
+                    'created_at',
+                    'merged_at',
+                    'merge_commit_sha',
+                    'body',
+                )
+            }
+            source = {'url': result['html_url'], 'fetched_at': time.time()}
+        result = {
+            **result,
+            'issue_groups': sorted(visible_issue_groups(case, result)),
+            'audit_source': source,
+            'issue_parser': 'visible_PR_body_without_HTML_comments_v1',
+        }
+        write(target, result)
+        return result
+
+    def mapping(self, case):
+        cid = case['instance_id']
+        target = self.output / 'function_audit' / (cid + '.json')
+        if target.exists():
+            saved = read(target)
+            if saved['patch_sha256'] != digest(case['patch']):
+                raise ValueError('Changed patch input')
+            for source in saved['sources']:
+                if sha(Path(source['cache_path'])) != source['sha256']:
+                    raise ValueError('Changed cached source')
+            return saved
+        root = self.output / 'source_files' / cid
+        sources, existing = [], set()
+        for info in parse_patch_files(case['patch']):
+            path = info['old_path']
+            if not path.endswith('.py') or info.get('new_file'):
+                continue
+            destination = safe_source_path(root, path)
+            url = (
+                f"https://raw.githubusercontent.com/{case['repo']}/"
+                f"{case['base_commit']}/{quote(path, safe='/')}"
+            )
+            if not destination.exists():
+                data = self.get(url).content
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temp = destination.with_suffix(destination.suffix + '.download')
+                temp.write_bytes(data)
+                temp.replace(destination)
+            sources.append(
+                {
+                    'path': path,
+                    'url': url,
+                    'cache_path': str(destination),
+                    'sha256': sha(destination),
+                }
+            )
+            for symbol in python_symbol_spans(destination):
+                if symbol['kind'] == 'function':
+                    existing.add(f"{path}::{symbol['qualified_name']}")
+        mapped = symbols_from_patch(case['patch'], root, source_side='old')
+        functions = mapped['functions']
+        result = {
+            'instance_id': cid,
+            'repo': case['repo'],
+            'base_commit': case['base_commit'],
+            'patch_sha256': digest(case['patch']),
+            'sources': sources,
+            'functions': functions,
+            'classes': mapped['classes'],
+            'existing_function_targets': [f for f in functions if f in existing],
+            'new_only_function_targets': [f for f in functions if f not in existing],
+            'mapping_evidence': mapped['evidence'],
+            'policy': 'unchanged existing mapper; changed lines on both sides; new-only targets flagged separately',
+        }
+        write(target, result)
+        return result
 
 
 def existing_targets(mapping):
@@ -53,7 +375,7 @@ def rescore_original():
         for arm in ARMS:
             old = previous.get('arms', {}).get(arm)
             if old is not None and truth:
-                row['arms'][arm] = bench.strict_metrics(list(dict.fromkeys(old['predictions']))[:5], truth)
+                row['arms'][arm] = strict_metrics(list(dict.fromkeys(old['predictions']))[:5], truth)
         rows.append(row)
         eligible = [r for r in rows if r['functions'] and len(r['arms']) == len(ARMS)]
         write(OUT / 'original_predictions_rescored.json', {'processed': len(rows), 'eligible': len(eligible),
@@ -91,9 +413,7 @@ def prepare(workers):
     write(OUT / 'config.json', cfg)
     for name in ('original_training.json', 'original_evaluation.json', 'training_candidates.json', 'evaluation_extension_order.json'):
         shutil.copyfile(AUDIT_CACHE / name, OUT / name)
-    code = [*sorted((ROOT / 'src').rglob('*.py')), Path(__file__),
-            ROOT / 'scripts/audit_rq1_temporal_expansion.py', ROOT / 'scripts/audit_rq1_expansion_candidates.py',
-            ROOT / 'scripts/run_rq1_temporal.py', ROOT / 'scripts/run_swe_explore_v5_stratified.py']
+    code = [*sorted((ROOT / 'src').rglob('*.py')), Path(__file__)]
     frozen = code + list((OUT / 'prompts').iterdir()) + [OUT / n for n in (
         'config.json', 'bootstrap_skills.jsonl', 'empty_skills.jsonl', 'original_training.json',
         'original_evaluation.json', 'training_candidates.json', 'evaluation_extension_order.json')]
@@ -209,7 +529,6 @@ def audit():
 
 
 def materialize(case):
-    bench.OUT = OUT
     if shutil.disk_usage(OUT).free < 8 * 1024**3:
         raise RuntimeError('Less than 8 GiB free; no automatic artifact deletion')
     cid = case['instance_id']
@@ -219,7 +538,7 @@ def materialize(case):
         archive.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(previous, archive)
     workspace = OUT / 'work' / cid
-    root, archive_sha = bench.unpack(case, workspace)
+    root, archive_sha = unpack(case, workspace)
     old = read(OUT / 'materialized' / (cid + '.json'))
     if old and old['original_archive_sha256'] != archive_sha:
         raise ValueError('Archive checksum changed')
@@ -281,14 +600,14 @@ def train():
         record = {'instance_id': case['instance_id'], 'input_sha256': sha(bank), 'output_bank': str(next_bank),
             'output_sha256': sha(next_bank), 'explorer_status': result.get('status'),
             'evolution_status': summary['status'],
-            'metrics': bench.strict_metrics(result.get('ranked_functions', [])[:5], case['function_ground_truth'])}
+            'metrics': strict_metrics(result.get('ranked_functions', [])[:5], case['function_ground_truth'])}
         write(directory / 'record.json', record)
         bank = next_bank
         rows.append(record)
         write(OUT / 'training_summary.json', {'historical_bootstrap': 200, 'new_completed': len(rows), 'cases': rows})
         if len(rows) == 100:
             shutil.copyfile(bank, OUT / 'skills_after300.jsonl')
-        bench.clean_workspace(workspace)
+        clean_workspace(workspace)
         if index <= 2 and (result.get('status') != 'completed' or summary['status'] == 'failed'):
             raise RuntimeError('Training smoke protocol failed; no outcome-based replacement')
     frozen = OUT / 'frozen_skills.jsonl'
@@ -327,14 +646,14 @@ def evaluate_case(job):
             predictions = list(dict.fromkeys(predictions))[:5]
             search = read(OUT / arm / 'cases' / cid / 'fault_skill_search.json', {})
             row['arms'][arm] = {'status': result.get('status'), 'predictions': predictions,
-                'metrics': bench.strict_metrics(predictions, case['function_ground_truth']),
+                'metrics': strict_metrics(predictions, case['function_ground_truth']),
                 'loaded_skill_id': (search.get('matched_skill') or {}).get('skill_id'),
                 'forced_finish': result.get('forced_finish'), 'steps': result.get('steps'),
                 'runtime_seconds': result.get('runtime_seconds')}
         if sha(bank) != bank_sha:
             raise ValueError('Bank changed during evaluation')
         write(finished, row)
-        bench.clean_workspace(workspace)
+        clean_workspace(workspace)
         write(OUT / 'jobs' / (cid + '.json'), {'phase': 'completed', 'time': time.time()})
         return row
 

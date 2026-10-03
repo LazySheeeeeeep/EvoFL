@@ -58,8 +58,6 @@
     "investigation_conclusion_max_tokens": 8192,
     "investigation_timeout_seconds": 900,
     "evolution_query_prompt_path": "prompt_records/reflection/evolution_query_v5.txt",
-    "fault_success_reflector_prompt_path": "prompt_records/reflection/fault_success_reflector_v5.txt",
-    "fault_failure_reflector_prompt_path": "prompt_records/reflection/fault_failure_reflector_v5.txt",
     "fault_target_selector_prompt_path": "prompt_records/reflection/fault_skill_target_selector_v1.txt",
     "fault_target_selector_attempts": 2,
     "query_attempts": 2,
