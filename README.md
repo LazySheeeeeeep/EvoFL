@@ -1,137 +1,209 @@
 # EvoFL: Self-Evolving Fault Localization via Retrospective-Analysis-based Skill Distillation
 
-EvoFL is a function-level fault localization framework that learns reusable
-investigation skills from completed localization trajectories. Instead of
-memorizing patch functions or answer-like summaries, EvoFL reconstructs the
-investigation process, identifies evidence gaps through a read-only
-supplementary investigation, and distills executable investigation lessons
-into a versioned Fault Skill bank.
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20WSL-orange)
+![Runner](https://img.shields.io/badge/Runner-run__main.py-green)
 
-The active workflow uses Fault Skills only. Project Skills and Strategy Skills
-are not used by the main experiment.
+This document describes how to set up EvoFL, connect the required datasets and
+API services, and run the main experiment.
 
-## Method Overview
+## 🛠️ Environment Setup
 
-```text
-Issue + repository
-  -> initial source exploration
-  -> load one Fault Skill (or continue without a Skill)
-  -> evidence-guided localization
-  -> finish_localization with up to five ranked functions
+We recommend running EvoFL in Linux or WSL with Python 3.10 or newer. The main
+runner uses `fcntl`, so native Windows Python is not supported.
 
-Completed trajectory
-  -> reconstruct the actual investigation
-  -> perform read-only supplementary investigation
-  -> identify evidence gaps and supported process lessons
-  -> independently select the Fault family and update target
-  -> create / rewrite / preserve / no_update
+### 1. Create the environment
+
+Using Conda:
+
+```bash
+conda create -n evofl python=3.10 -y
+conda activate evofl
 ```
 
-During localization, the Explorer retains the exact tool observations and a
-complete action index. During evolution, original `obs-` observations and
-supplementary `supp-` observations remain separate. A resolved investigation
-lesson must be anchored to reviewed evidence; unresolved investigations do not
-modify the Skill bank.
+Or using `venv`:
 
-Fault Skills contain a family, title, trigger, and an unordered list of
-investigation knowledge strings. Skill cards are versioned and stored as JSONL.
-
-## Repository Layout
-
-| Path | Purpose |
-|---|---|
-| `src/evolutefl/` | Core Explorer, trajectory logging, retrospective investigation, Reflector, Skill bank, and evaluation code. |
-| `scripts/run_main.py` | Self-contained main experiment runner for chronological acquisition, Skill evolution, and frozen-bank evaluation. |
-| `config/evolutefl.global.json` | Active EvoFL configuration, including model settings and the seven runtime prompt paths. |
-| `prompt_records/` | The seven prompts required by the active v5 localization and evolution workflow. |
-| `skill_pools/skill_bank_v5/` | Local Fault Skill bank location. The bank is generated during runs and is not tracked. |
-
-## Requirements
-
-- Linux or WSL. The main runner uses `fcntl` for process-safe run and case locks.
-- Python `>=3.10`.
-- Network access for the configured LLM endpoint and, when metadata is not
-  cached, GitHub API/archive requests.
-- `DEEPSEEK_API_KEY` in the process environment for model-backed phases.
-- Optional `GITHUB_TOKEN` or `GH_TOKEN` to increase GitHub API rate limits.
-- Two historical local run directories used as frozen inputs:
-
-```text
-runs/rq1_temporal_deepseek_20260915/
-runs/rq1_expanded400_eval500_deepseek_20260922/
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-These directories contain the historical manifests, metadata, source caches,
-frozen initial Skill bank, and audit candidates. They are local experiment
-inputs and are intentionally excluded from Git. The main runner fails closed
-when a required frozen input is missing or changed.
-
-## Installation
+### 2. Install EvoFL
 
 ```bash
 cd /mnt/d/projects/EvoluteFL
-python3 -m venv .venv
-source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 python -m pip install requests
 ```
 
-Credentials must be supplied only through environment variables:
+### 3. Verify the environment
 
 ```bash
-export DEEPSEEK_API_KEY='...'
-export GITHUB_TOKEN='...'   # optional
-export PYTHONPATH=src
+python3 --version
+python -c "import requests; print('requests', requests.__version__)"
+PYTHONPATH=src python3 scripts/run_main.py --help
 ```
 
-Do not place credentials in configuration files or run artifacts.
+## 📥 Dataset Access
 
-## Main Experiment
-
-The runner writes to:
+The repository does not redistribute the preprocessed historical run data.
+Before running the experiment, place the following two directories under
+`runs/`:
 
 ```text
-runs/main_experiment/
+runs/
+├── rq1_temporal_deepseek_20260915/
+└── rq1_expanded400_eval500_deepseek_20260922/
 ```
 
-The phases are:
+### Required inputs for `rq1_temporal_deepseek_20260915`
 
-| Phase | Model calls | Description |
-|---|---:|---|
-| `prepare` | No | Validates historical inputs, copies frozen manifests and prompts, and writes a hashed protocol. |
-| `rescore` | No | Recomputes the historical function ground truth without running the model. |
-| `audit` | No model calls | Performs temporal, duplicate, and function-eligibility auditing, then freezes 200 additional acquisition cases and 500 evaluation cases. |
-| `full` | Yes | Runs the preparation checks followed by 200 additional acquisition/evolution cases and 500 frozen-bank evaluation cases. |
+The historical base run must contain:
 
-Run only preparation:
+```text
+protocol.json
+config.json
+frozen_skills.jsonl
+training_complete.json
+evaluation_candidates.json
+comparison_summary.json
+pr_metadata/
+sources/
+```
+
+### Required inputs for `rq1_expanded400_eval500_deepseek_20260922`
+
+The audit cache must contain:
+
+```text
+original_training.json
+original_evaluation.json
+training_candidates.json
+evaluation_extension_order.json
+pr_metadata/
+function_audit/
+source_files/
+```
+
+The original issues and repair patches are derived from the SWE-bench family:
+
+```text
+princeton-nlp/SWE-bench
+princeton-nlp/SWE-bench_Lite
+princeton-nlp/SWE-bench_Verified
+```
+
+EvoFL reads the frozen EvoFL manifests under `runs/`; it does not download or
+rebuild those manifests automatically. The runner validates the input hashes
+and stops if a required file is missing or changed.
+
+## 🔑 API Access
+
+### DeepSeek API
+
+Export the official DeepSeek credential for the phases that call the model:
+
+```bash
+export DEEPSEEK_API_KEY="your_deepseek_api_key"
+```
+
+The main runner uses:
+
+```text
+Provider: DeepSeek
+Model:    deepseek-v4-flash
+Base URL: https://api.deepseek.com
+```
+
+### GitHub API
+
+EvoFL can reuse cached PR metadata and source files. If a required metadata
+entry is not cached, export a GitHub token to avoid low anonymous rate limits:
+
+```bash
+export GITHUB_TOKEN="your_github_token"
+```
+
+`GH_TOKEN` is also supported.
+
+### Credential Safety
+
+Do not place API keys in `config/`, prompts, scripts, or run outputs. All
+credentials are read from process environment variables.
+
+## 🚀 How to Run
+
+### Quick Start
+
+Set the environment and run the complete main experiment:
+
+```bash
+export DEEPSEEK_API_KEY="your_deepseek_api_key"
+export GITHUB_TOKEN="your_github_token"   # optional
+export PYTHONPATH=src
+
+python3 scripts/run_main.py \
+  --phase full \
+  --workers 4
+```
+
+The complete run performs:
+
+```text
+prepare
+  -> rescore
+  -> audit
+  -> 200 additional acquisition and evolution cases
+  -> 500 frozen-bank evaluation cases
+```
+
+### Phase-by-Phase Execution
+
+#### 1. Prepare frozen inputs
+
+This phase validates historical data, copies prompts and manifests, and writes
+the hashed protocol. It does not call the model.
 
 ```bash
 PYTHONPATH=src python3 scripts/run_main.py --phase prepare --workers 4
 ```
 
-Run the complete experiment:
+#### 2. Recompute historical ground truth
+
+This phase recomputes the historical function-level labels without model calls.
 
 ```bash
-DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
-PYTHONPATH=src \
-python3 scripts/run_main.py --phase full --workers 4
+PYTHONPATH=src python3 scripts/run_main.py --phase rescore --workers 4
 ```
 
-`--workers` accepts values from `1` to `8`. Lower concurrency is useful when
-the LLM endpoint or Docker/WSL resources are constrained.
+#### 3. Audit and freeze the case split
 
-The runner is checkpointed:
+This phase performs temporal, duplicate, and function-eligibility checks and
+freezes the additional acquisition and evaluation manifests.
 
-- Completed Explorer cases are reused through `result.json`.
-- Completed evolution cases are reused through
-  `case_evolution/case_evolution_summary.json`.
-- Completed evaluation cases are reused through `paired/<instance_id>.json`.
-- The frozen Skill bank hash is checked before and during evaluation.
+```bash
+PYTHONPATH=src python3 scripts/run_main.py --phase audit --workers 4
+```
 
-## Outputs
+#### 4. Run acquisition, evolution, and evaluation
 
-Important files under `runs/main_experiment/` include:
+```bash
+PYTHONPATH=src python3 scripts/run_main.py --phase full --workers 4
+```
+
+`--workers` accepts values from `1` to `8`. Reduce concurrency when API,
+Docker, or WSL resources are constrained.
+
+## 📊 Outputs
+
+All main experiment outputs are written to:
+
+```text
+runs/main_experiment/
+```
+
+The most important result files are:
 
 ```text
 protocol.json
@@ -145,40 +217,25 @@ paired/<instance_id>.json
 comparison_summary.json
 ```
 
-Per-case localization artifacts include:
+Per-case localization and reflection artifacts are stored under:
 
 ```text
-run_context.json
-initial_payload.json
-observations.jsonl
-trajectory.jsonl
-investigation_index.json
-fault_skill_search.json
-result.json
+runs/main_experiment/training/<instance_id>/
+runs/main_experiment/with_skill/cases/<instance_id>/
 ```
 
-Per-case evolution artifacts include:
+The final `comparison_summary.json` reports function-level
+`Top-1`, `Top-3`, `Top-5`, and `MRR`.
 
-```text
-case_evolution/supplementary/
-investigation_conclusion.json
-evolution_queries.json
-fault_reflector_output.json
-applied_updates.json
-case_evolution_summary.json
-```
+## ✅ Resume and Reproducibility
 
-The final `comparison_summary.json` contains function-level
-`Top-1`, `Top-3`, `Top-5`, and `MRR`, together with status and Skill-loading
-statistics.
-
-## Reproducibility Notes
-
-- Prompts, configuration, source files, and frozen manifests are hashed in
+- Explorer results are reused through `result.json`.
+- Evolution results are reused through
+  `case_evolution/case_evolution_summary.json`.
+- Evaluation results are reused through `paired/<instance_id>.json`.
+- The frozen Skill bank is hash-checked before and during evaluation.
+- Prompt, configuration, source, and manifest hashes are stored in
   `protocol.json`.
-- Evaluation uses a frozen Skill bank and a predeclared evaluation manifest.
-- Ground-truth functions are used during training and scoring, not injected
-  into the Explorer input.
-- The repository contains only the main experiment entry point; external
-  baselines, ablations, diagnostics, and historical run outputs remain local
-  and are excluded from Git.
+- Ground-truth functions are used for training and scoring, not injected into
+  the localization input.
+
