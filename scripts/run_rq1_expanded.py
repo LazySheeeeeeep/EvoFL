@@ -1,6 +1,8 @@
-"""Chronological extension: existing-function audit, serial learning, parallel FL.
+"""Main chronological RQ1 run: serial Skill evolution and parallel FL.
 
-Independent of the completed RQ1 run. All credentials are environment-only.
+The tracked runner evaluates only the proposed with-Skill method. Historical
+comparison arms remain in local run artifacts but are not part of this runner.
+All credentials are environment-only.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ from evolutefl.reflection import run_case_evolution
 from evolutefl.skills import make_skill_bank
 
 OUT = ROOT / 'runs/rq1_expanded400_eval500_v4flash_existingfunc_20260922'
-ARMS = ('with_skill', 'no_skill', 'agentless_fl')
+ARMS = ('with_skill',)
 POLICY = 'changed_patch_functions_intersect_existing_base_functions_v1'
 
 
@@ -91,10 +93,7 @@ def prepare(workers):
         shutil.copyfile(AUDIT_CACHE / name, OUT / name)
     code = [*sorted((ROOT / 'src').rglob('*.py')), Path(__file__),
             ROOT / 'scripts/audit_rq1_temporal_expansion.py', ROOT / 'scripts/audit_rq1_expansion_candidates.py',
-            ROOT / 'scripts/run_rq1_temporal.py', ROOT / 'scripts/run_swe_explore_v5_stratified.py',
-            ROOT / 'scripts/run_agentless_heldout30.py']
-    from run_agentless_heldout30 import UPSTREAM
-    code.extend(sorted(UPSTREAM.rglob('*.py')))
+            ROOT / 'scripts/run_rq1_temporal.py', ROOT / 'scripts/run_swe_explore_v5_stratified.py']
     frozen = code + list((OUT / 'prompts').iterdir()) + [OUT / n for n in (
         'config.json', 'bootstrap_skills.jsonl', 'empty_skills.jsonl', 'original_training.json',
         'original_evaluation.json', 'training_candidates.json', 'evaluation_extension_order.json')]
@@ -300,10 +299,9 @@ def train():
 
 
 def evaluate_case(job):
-    """Each process runs all arms of one case; globals/workspaces are never shared."""
+    """Each process evaluates one case; globals/workspaces are never shared."""
     index, case = job
     import fcntl
-    import run_agentless_heldout30 as agentless
     cid = case['instance_id']
     (OUT / 'jobs').mkdir(exist_ok=True)
     with (OUT / 'jobs' / (cid + '.lock')).open('a') as lock:
@@ -319,20 +317,13 @@ def evaluate_case(job):
                 raise ValueError('Incompatible previous result')
             return row
         config = read(OUT / 'config.json')
-        agentless.OUT, agentless.SOURCE = OUT / 'agentless_fl', OUT
-        (agentless.OUT / 'work').mkdir(parents=True, exist_ok=True)
         row = {'instance_id': cid, 'repo': case['repo'], 'functions': case['function_ground_truth'],
                'bank_sha256': bank_sha, 'label_policy': POLICY, 'arms': {}}
-        for arm in ARMS[index % 3:] + ARMS[:index % 3]:
+        for arm in ARMS:
             write(OUT / 'jobs' / (cid + '.json'), {'phase': arm, 'instance_id': cid, 'time': time.time()})
             workspace, root = materialize(case)
-            if arm == 'agentless_fl':
-                result = agentless.run_case(case, config['llm'])
-                predictions = result.get('predictions', [])
-            else:
-                result = explorer(case, config, root, OUT / arm / 'cases' / cid,
-                                  bank if arm == 'with_skill' else OUT / 'empty_skills.jsonl')
-                predictions = result.get('ranked_functions', [])
+            result = explorer(case, config, root, OUT / arm / 'cases' / cid, bank)
+            predictions = result.get('ranked_functions', [])
             predictions = list(dict.fromkeys(predictions))[:5]
             search = read(OUT / arm / 'cases' / cid / 'fault_skill_search.json', {})
             row['arms'][arm] = {'status': result.get('status'), 'predictions': predictions,

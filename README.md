@@ -57,17 +57,12 @@ variables such as `DEEPSEEK_API_KEY`, rather than result files.
 ```bash
 PYTHONPATH=src python3 -m pytest -q
 PYTHONPATH=src python3 -m evolutefl.cli show-tools
-PYTHONPATH=src python3 scripts/run_swesmith_case_by_case.py \
-  --provider deepseek --model deepseek-v4-flash --sample-size 2 \
-  --seed 20260907 --max-steps 30 --case-timeout-seconds 900 \
-  --output-dir runs/v5_smoke_2_deepseek_20260907
-python3 scripts/report_v5_run.py runs/v5_smoke_2_deepseek_20260907
+bash scripts/start_rq1_expanded_secure.sh
 ```
 
-Separate `run-case-evolution` requires `--case-run-dir`, `--repo-path`,
-`--repo`, issue input and ground-truth functions. For SWE-smith mutation patches,
-supply `--ground-truth-patch-file` and `--patch-direction clean_to_buggy`.
-A second successful Explorer run and repository tests are not required.
+The main runner performs the chronological 400-case acquisition and 500-case
+evaluation using only the proposed with-Skill method. Credentials are read from
+the process environment and are never written into the repository.
 
 Top-5 hit/miss remains a patch-function ranking outcome, not a judgment of
 investigation quality. The Investigator attributes each supported finding to
@@ -80,5 +75,4 @@ Older conclusions without this field remain unattributed (`uncertain`).
 Inspect `investigation_index.json`, `observations.jsonl`, `trajectory.jsonl`,
 then `case_evolution/supplementary/`, `investigation_conclusion.json`,
 `fault_reflector_output.json`, `applied_updates.json`, and
-`case_evolution_summary.json`. The two-case smoke tests protocol and
-traceability, not an accuracy improvement; frozen-bank ablations remain necessary.
+`case_evolution_summary.json`.

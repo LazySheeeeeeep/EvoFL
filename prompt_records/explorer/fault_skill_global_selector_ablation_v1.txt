@@ -1,6 +1,0 @@
-Select at most one Fault Skill from the complete frozen catalog.
-
-Each catalog entry contains only a skill ID, title, and trigger. Compare the current issue and observed repository responsibility path with every entry. Select a card only when its trigger describes a compatible causal failure mechanism and its investigation guidance is plausibly relevant. Shared vocabulary or repository domain alone is insufficient. Return null when no card is a reliable match.
-
-Return exactly one JSON object:
-{"selected_skill_id":"id or null","reason":"short evidence-based reason"}

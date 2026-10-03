@@ -22,8 +22,8 @@ def test_existing_targets_deduplicated():
                                     'new_only_function_targets': ['a.py::new']}) == ['a.py::old']
 
 
-def test_all_arms_and_no_apr_baseline():
-    assert runner.ARMS == ('with_skill', 'no_skill', 'agentless_fl')
+def test_main_runner_evaluates_only_the_proposed_method():
+    assert runner.ARMS == ('with_skill',)
 
 
 def test_explorer_only_sees_issue_and_repo_not_labels(tmp_path):
@@ -65,10 +65,8 @@ def _fake_isolated_case(args):
     case = {'instance_id': f'case-{index}', 'repo': 'a/b', 'function_ground_truth': ['a.py::f']}
     workspace = Path(root) / 'work' / case['instance_id']
     workspace.mkdir(parents=True)
-    import run_agentless_heldout30 as agentless
     with patch.object(runner, 'materialize', return_value=(workspace, workspace)), \
          patch.object(runner, 'explorer', return_value={'status': 'completed', 'ranked_functions': ['a.py::f']}), \
-         patch.object(agentless, 'run_case', return_value={'status': 'completed', 'predictions': ['a.py::f']}), \
          patch.object(runner.bench, 'clean_workspace'):
         time.sleep(0.1)
         result = runner.evaluate_case((index, case))

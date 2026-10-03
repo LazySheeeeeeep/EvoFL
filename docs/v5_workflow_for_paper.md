@@ -104,4 +104,4 @@ Explorer 仍只选一个 family、最多加载一条 Skill，selector 和 knowle
 - `src/evolutefl/reflection/v5_investigator.py`
 - `src/evolutefl/reflection/v5_evolution.py`
 - `src/evolutefl/evaluation/patch_ground_truth.py`
-- `scripts/run_swesmith_case_by_case.py`
+- `scripts/run_rq1_expanded.py`

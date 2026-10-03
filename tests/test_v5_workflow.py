@@ -502,15 +502,6 @@ def test_v5_conclusion_retry_retains_evidence_and_previous_answer(tmp_path, prev
     assert (directory / "case_evolution/supplementary/conclusion_retries.jsonl").exists()
 
 
-def test_v5_report_mrr_is_reciprocal_rank(tmp_path):
-    from scripts.report_v5_run import build_report
-    case = tmp_path / "cases/demo/case_evolution"
-    case.mkdir(parents=True)
-    (case / "case_evolution_summary.json").write_text(json.dumps({"function_metrics": {
-        "top1": False, "top3": True, "top5": True, "reciprocal_rank": 0.5}}))
-    assert build_report(tmp_path)["function_metrics"]["mrr"] == 0.5
-
-
 def test_v5_prose_with_code_before_fenced_conclusion_needs_no_retry(tmp_path):
     root, directory, cfg, _ = prepare(tmp_path)
     answer = conclusion()

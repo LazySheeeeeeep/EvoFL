@@ -22,7 +22,7 @@ from evolutefl.skills import make_skill_bank
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'runs/rq1_temporal_deepseek_20260915'
 read, write, sha = bench.read, bench.write, bench.sha
-ARMS = ('with_skill', 'no_skill', 'agentless_fl')
+ARMS = ('with_skill',)
 
 
 def exposure(root):
@@ -123,8 +123,7 @@ def prepare():
     write(OUT / 'config.json', cfg)
     for path in [OUT / 'config.json', OUT / 'acquisition_candidates.json', OUT / 'evaluation_candidates.json',
                  OUT / 'initial_skills.jsonl', OUT / 'empty_skills.jsonl',
-                 *sorted((ROOT / 'src').rglob('*.py')), Path(__file__), Path(bench.__file__),
-                 ROOT / 'scripts/run_agentless_heldout30.py']:
+                 *sorted((ROOT / 'src').rglob('*.py')), Path(__file__), Path(bench.__file__)]:
         hashes[str(path)] = sha(path)
     write(OUT / 'protocol.json', {'target_acquisition_count': 200, 'seed': 20260915,
         'acquisition_candidate_count': len(train), 'evaluation_candidate_count': len(test),
@@ -288,11 +287,8 @@ def train(cfg, limit):
 
 
 def evaluate(cfg):
-    import run_agentless_heldout30 as agentless
     bank = OUT / 'frozen_skills.jsonl'
     digest = read(OUT / 'training_complete.json')['bank_sha256']
-    agentless.OUT, agentless.SOURCE = OUT / 'agentless_fl', OUT
-    (agentless.OUT / 'work').mkdir(parents=True, exist_ok=True)
     rows = []
     for index, case in enumerate(read(OUT / 'evaluation_candidates.json')):
         verify()
@@ -306,17 +302,11 @@ def evaluate(cfg):
         work, root, mapped = materialize(case)
         row = {'instance_id': cid, 'repo': case['repo'], 'functions': mapped['function_ground_truth'], 'arms': {}}
         if mapped['function_ground_truth']:
-            order = ARMS[index % 3:] + ARMS[:index % 3]
-            for arm in order:
+            for arm in ARMS:
                 write(OUT / 'current_case.json', {'phase': arm, 'index': index+1, 'instance_id': cid})
-                if arm == 'agentless_fl':
-                    result = agentless.run_case(case, cfg['llm'])
-                    predictions = result.get('predictions', [])
-                else:
-                    work, root, _ = materialize(case)
-                    result = explorer(case, cfg, root, OUT / arm / 'cases' / cid,
-                                      bank if arm == 'with_skill' else OUT / 'empty_skills.jsonl')
-                    predictions = result.get('ranked_functions', [])
+                work, root, _ = materialize(case)
+                result = explorer(case, cfg, root, OUT / arm / 'cases' / cid, bank)
+                predictions = result.get('ranked_functions', [])
                 search = read(OUT / arm / 'cases' / cid / 'fault_skill_search.json', {})
                 row['arms'][arm] = {'status': result.get('status'), 'predictions': predictions,
                     'metrics': bench.strict_metrics(predictions[:5], mapped['function_ground_truth']),

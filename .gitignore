@@ -27,39 +27,42 @@ skill_pools/skill_bank/embeddings/
 /.worktrees/
 /tmp/
 
-# External and controlled baseline experiments stay local; the main method
-# repository tracks only the framework, main runners, ablations, and tests.
-/scripts/*agentless*
-/scripts/*cosil*
-/scripts/*locagent*
-/scripts/*rgfl*
-/scripts/*memfl*
-/scripts/*repomem*
-/scripts/*swe_exp_*
-/scripts/build_rq1_flat_reflections.py
-/scripts/build_rq1_oracle_function_reflections.py
-/scripts/discover_swe_explore_transfer_candidates.py
-/scripts/prepare_external_*
-/scripts/prepare_rq1_memory_baselines.py
-/scripts/rq1_memory_runtime.py
-/scripts/run_rag_*
-/scripts/run_rq1_memory_baseline.py
-/scripts/start_rag_*
-/scripts/start_rq1_memory*
-/scripts/swe_exp_loc_*
+# Only the proposed main experiment entry points are versioned. Baseline,
+# ablation, diagnostic, online, and paper-specific runners stay local.
+/scripts/*
+!/scripts/audit_rq1_expansion_candidates.py
+!/scripts/audit_rq1_temporal_expansion.py
+!/scripts/run_rq1_expanded.py
+!/scripts/run_rq1_temporal.py
+!/scripts/run_swe_explore_explorer_compare.py
+!/scripts/run_swe_explore_v5_stratified.py
+!/scripts/run_swebench_verified_explorer_compare.py
+!/scripts/start_rq1_expanded_secure.sh
+
+# Experimental banks and run outputs remain local; keep the directory marker.
+/skill_pools/skill_bank_v5/skills.jsonl
 /docs/*agentless*
 /docs/*external*
+/docs/rq1_experiment_board_20260924.md
 /docs/rq1_*memory*
 /tests/test_agentless_baseline.py
 /tests/test_build_rq1_flat_reflections.py
 /tests/test_build_rq1_oracle_function_reflections.py
+/tests/test_evidence_reflector_experiment.py
+/tests/test_experience_expansion.py
 /tests/test_external_baseline_preparation.py
+/tests/test_fault_payload_isolation.py
 /tests/test_locagent_normalization.py
 /tests/test_normalize_cosil_functions.py
 /tests/test_prepare_cosil_*
 /tests/test_prepare_external_*
 /tests/test_prepare_rq1_memory_baselines.py
 /tests/test_rq1_memory_runtime.py
+/tests/test_rq1_issue_only_ablation.py
 /tests/test_run_cosil_*
 /tests/test_run_rgfl_*
 /tests/test_swe_exp_*
+/tests/test_swesmith_materialization.py
+
+# Ablation-only prompts stay local.
+/prompt_records/explorer/fault_skill_global_selector_ablation_v1.txt

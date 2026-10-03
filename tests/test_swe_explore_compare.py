@@ -15,7 +15,6 @@ from run_swe_explore_explorer_compare import (
     score_function_case,
 )
 from run_swebench_verified_explorer_compare import _windows_host_path as verified_windows_host_path
-from run_swesmith_case_by_case import _windows_host_path, is_usable_source_repo
 
 
 def test_score_function_case_uses_patch_function_ground_truth() -> None:
@@ -124,17 +123,5 @@ def test_compare_uses_arm_local_repo_copies_by_default() -> None:
     assert args.llm_timeout is None
 
 
-def test_swesmith_cache_requires_a_git_repo_with_python_source() -> None:
-    with TemporaryDirectory() as temporary:
-        root = Path(temporary)
-        (root / ".git").mkdir()
-        (root / "generated.pyc").write_bytes(b"cache")
-        assert is_usable_source_repo(root) is False
-
-        (root / "module.py").write_text("def run():\n    return 1\n", encoding="utf-8")
-        assert is_usable_source_repo(root) is True
-
-
 def test_wsl_mount_is_converted_for_docker_exe_copy() -> None:
-    assert _windows_host_path(Path("/mnt/d/projects/EvoluteFL/runs/repo")) == r"D:\projects\EvoluteFL\runs\repo"
     assert verified_windows_host_path(Path("/mnt/d/projects/EvoluteFL/runs/repo")) == r"D:\projects\EvoluteFL\runs\repo"
