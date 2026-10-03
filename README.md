@@ -1,77 +1,184 @@
-# EvoluteFL v5
+# EvoFL: Self-Evolving Fault Localization via Retrospective-Analysis-based Skill Distillation
 
-Function-level fault localization with evidence-grounded investigation experience.
-The active workflow uses only Fault Skills; Project and Strategy are inactive.
+EvoFL is a function-level fault localization framework that learns reusable
+investigation skills from completed localization trajectories. Instead of
+memorizing patch functions or answer-like summaries, EvoFL reconstructs the
+investigation process, identifies evidence gaps through a read-only
+supplementary investigation, and distills executable investigation lessons
+into a versioned Fault Skill bank.
 
-## Localization
+The active workflow uses Fault Skills only. Project Skills and Strategy Skills
+are not used by the main experiment.
 
-```text
-Issue + repository -> initial source exploration -> load_fault_skill once
--> continue investigation -> finish_localization (up to five functions)
-```
-
-V5 tools: `grep`, `find_symbol`, `read_symbol`, `read_file`, `read_observation`,
-and `write`. Python symbol search returns definition IDs, signatures and ranges;
-symbol reading includes decorators and supports continuation within the body.
-Source reads return up to 200 complete lines and target 16,000 source characters
-per page (a single oversized line is delivered whole). `next_start_line`
-identifies unread content. The observation layer preserves the entire page;
-it never clips serialized tool results. Replay returns exactly the originally
-delivered observation, not hidden raw content. Write saves notes only under the
-run's `artifacts/` directory. Fault loading selects one of nine families,
-uses a title/trigger catalog selector, then validates the selected knowledge.
-At most one Skill is loaded as a native tool response. No embedding service
-is required; an empty catalog is a valid no-Skill result.
-
-Calls may include `purpose`, `based_on` observation IDs and `candidate_updates`.
-Source definitions appearing in tool results are not automatic hypotheses.
-Logs retain exact tool responses and a complete action index. Default limits:
-30 steps, three finalization turns and 900 seconds.
-
-## Evolution
+## Method Overview
 
 ```text
-Completed trace -> indexed investigation
--> read-only supplementary investigation (at most 16 calls)
--> supported process lesson -> independent Fault catalog selection
--> evidence-driven Reflector -> create / rewrite / preserve / no_update
+Issue + repository
+  -> initial source exploration
+  -> load one Fault Skill (or continue without a Skill)
+  -> evidence-guided localization
+  -> finish_localization with up to five ranked functions
+
+Completed trajectory
+  -> reconstruct the actual investigation
+  -> perform read-only supplementary investigation
+  -> identify evidence gaps and supported process lessons
+  -> independently select the Fault family and update target
+  -> create / rewrite / preserve / no_update
 ```
 
-The investigator uses `grep`, `find_symbol`, `read_symbol`, `read_file`, and `read_observation` against the
-same buggy source. Ground truth is training-only. Original `obs-` evidence
-and supplementary `supp-` discoveries are separate. Every resolved finding
-anchors a reviewed original source observation. Unresolved findings never
-update the bank. Repository fingerprints prevent replay on changed code;
-old trajectory formats are rejected.
+During localization, the Explorer retains the exact tool observations and a
+complete action index. During evolution, original `obs-` observations and
+supplementary `supp-` observations remain separate. A resolved investigation
+lesson must be anchored to reviewed evidence; unresolved investigations do not
+modify the Skill bank.
 
-Skills contain family, subtype, title, trigger and unordered knowledge strings.
-Evidence references remain in run artifacts, outside Skill cards. Existing
-complete-card versioning is reused. The active bank is
-`skill_pools/skill_bank_v5/skills.jsonl`.
+Fault Skills contain a family, title, trigger, and an unordered list of
+investigation knowledge strings. Skill cards are versioned and stored as JSONL.
 
-## WSL Commands
+## Repository Layout
 
-Run from `/mnt/d/projects/EvoluteFL`. Configure credentials using environment
-variables such as `DEEPSEEK_API_KEY`, rather than result files.
+| Path | Purpose |
+|---|---|
+| `src/evolutefl/` | Core Explorer, trajectory logging, retrospective investigation, Reflector, Skill bank, and evaluation code. |
+| `scripts/run_main.py` | Self-contained main experiment runner for chronological acquisition, Skill evolution, and frozen-bank evaluation. |
+| `config/evolutefl.global.json` | Active EvoFL configuration, including model settings and the seven runtime prompt paths. |
+| `prompt_records/` | The seven prompts required by the active v5 localization and evolution workflow. |
+| `skill_pools/skill_bank_v5/` | Local Fault Skill bank location. The bank is generated during runs and is not tracked. |
+
+## Requirements
+
+- Linux or WSL. The main runner uses `fcntl` for process-safe run and case locks.
+- Python `>=3.10`.
+- Network access for the configured LLM endpoint and, when metadata is not
+  cached, GitHub API/archive requests.
+- `DEEPSEEK_API_KEY` in the process environment for model-backed phases.
+- Optional `GITHUB_TOKEN` or `GH_TOKEN` to increase GitHub API rate limits.
+- Two historical local run directories used as frozen inputs:
+
+```text
+runs/rq1_temporal_deepseek_20260915/
+runs/rq1_expanded400_eval500_deepseek_20260922/
+```
+
+These directories contain the historical manifests, metadata, source caches,
+frozen initial Skill bank, and audit candidates. They are local experiment
+inputs and are intentionally excluded from Git. The main runner fails closed
+when a required frozen input is missing or changed.
+
+## Installation
 
 ```bash
-PYTHONPATH=src python3 -m evolutefl.cli show-tools
-DEEPSEEK_API_KEY=... PYTHONPATH=src python3 scripts/run_main.py --phase full --workers 4
+cd /mnt/d/projects/EvoluteFL
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install requests
 ```
 
-The main runner performs the chronological 400-case acquisition and 500-case
-evaluation using only the proposed with-Skill method. Credentials are read from
-the process environment and are never written into the repository.
+Credentials must be supplied only through environment variables:
 
-Top-5 hit/miss remains a patch-function ranking outcome, not a judgment of
-investigation quality. The Investigator attributes each supported finding to
-evidence acquisition, interpretation, candidate ranking, or a useful observed
-practice, retaining uncertainty where the record is insufficient. One shared
-Reflector prompt uses these findings for both hit and miss cases. The summary
-records `learning_foci`; these are diagnostic metadata, not new Skill types.
-Older conclusions without this field remain unattributed (`uncertain`).
+```bash
+export DEEPSEEK_API_KEY='...'
+export GITHUB_TOKEN='...'   # optional
+export PYTHONPATH=src
+```
 
-Inspect `investigation_index.json`, `observations.jsonl`, `trajectory.jsonl`,
-then `case_evolution/supplementary/`, `investigation_conclusion.json`,
-`fault_reflector_output.json`, `applied_updates.json`, and
-`case_evolution_summary.json`.
+Do not place credentials in configuration files or run artifacts.
+
+## Main Experiment
+
+The runner writes to:
+
+```text
+runs/main_experiment/
+```
+
+The phases are:
+
+| Phase | Model calls | Description |
+|---|---:|---|
+| `prepare` | No | Validates historical inputs, copies frozen manifests and prompts, and writes a hashed protocol. |
+| `rescore` | No | Recomputes the historical function ground truth without running the model. |
+| `audit` | No model calls | Performs temporal, duplicate, and function-eligibility auditing, then freezes 200 additional acquisition cases and 500 evaluation cases. |
+| `full` | Yes | Runs the preparation checks followed by 200 additional acquisition/evolution cases and 500 frozen-bank evaluation cases. |
+
+Run only preparation:
+
+```bash
+PYTHONPATH=src python3 scripts/run_main.py --phase prepare --workers 4
+```
+
+Run the complete experiment:
+
+```bash
+DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" \
+PYTHONPATH=src \
+python3 scripts/run_main.py --phase full --workers 4
+```
+
+`--workers` accepts values from `1` to `8`. Lower concurrency is useful when
+the LLM endpoint or Docker/WSL resources are constrained.
+
+The runner is checkpointed:
+
+- Completed Explorer cases are reused through `result.json`.
+- Completed evolution cases are reused through
+  `case_evolution/case_evolution_summary.json`.
+- Completed evaluation cases are reused through `paired/<instance_id>.json`.
+- The frozen Skill bank hash is checked before and during evaluation.
+
+## Outputs
+
+Important files under `runs/main_experiment/` include:
+
+```text
+protocol.json
+config.json
+progress.json
+training_summary.json
+frozen_skills.jsonl
+training_complete.json
+evaluation_cases.json
+paired/<instance_id>.json
+comparison_summary.json
+```
+
+Per-case localization artifacts include:
+
+```text
+run_context.json
+initial_payload.json
+observations.jsonl
+trajectory.jsonl
+investigation_index.json
+fault_skill_search.json
+result.json
+```
+
+Per-case evolution artifacts include:
+
+```text
+case_evolution/supplementary/
+investigation_conclusion.json
+evolution_queries.json
+fault_reflector_output.json
+applied_updates.json
+case_evolution_summary.json
+```
+
+The final `comparison_summary.json` contains function-level
+`Top-1`, `Top-3`, `Top-5`, and `MRR`, together with status and Skill-loading
+statistics.
+
+## Reproducibility Notes
+
+- Prompts, configuration, source files, and frozen manifests are hashed in
+  `protocol.json`.
+- Evaluation uses a frozen Skill bank and a predeclared evaluation manifest.
+- Ground-truth functions are used during training and scoring, not injected
+  into the Explorer input.
+- The repository contains only the main experiment entry point; external
+  baselines, ablations, diagnostics, and historical run outputs remain local
+  and are excluded from Git.
