@@ -51,6 +51,34 @@ ARMS = ('with_skill',)
 POLICY = 'changed_patch_functions_intersect_existing_base_functions_v1'
 
 
+def main_llm_config(config):
+    llm = dict(config.get('llm') or {})
+    llm['base_url'] = (
+        os.getenv('OPENAI_BASE_URL')
+        or llm.get('base_url')
+        or 'https://api.openai.com/v1'
+    )
+    llm['api_key_env'] = 'OPENAI_API_KEY'
+    llm['model'] = (
+        os.getenv('EVOLUTEFL_MODEL')
+        or os.getenv('OPENAI_MODEL')
+        or llm.get('model')
+        or 'gpt-4o-mini'
+    )
+    supports_tool_choice = os.getenv('EVOLUTEFL_SUPPORTS_TOOL_CHOICE')
+    if supports_tool_choice is None:
+        llm['supports_tool_choice'] = bool(llm.get('supports_tool_choice', True))
+    else:
+        llm['supports_tool_choice'] = supports_tool_choice.strip().lower() not in {
+            '0',
+            'false',
+            'no',
+            'off',
+        }
+    llm['temperature'] = 0
+    return llm
+
+
 def read(path, default=None):
     return json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else default
 
@@ -394,8 +422,7 @@ def prepare(workers):
     if sha(ORIGINAL / 'frozen_skills.jsonl') != read(ORIGINAL / 'training_complete.json')['bank_sha256']:
         raise ValueError('Historical bank changed')
     cfg = copy.deepcopy(read(ORIGINAL / 'config.json'))
-    cfg['llm'].update(base_url='https://api.deepseek.com', api_key_env='DEEPSEEK_API_KEY',
-                      model='deepseek-v4-flash', supports_tool_choice=False, temperature=0)
+    cfg['llm'] = main_llm_config(cfg)
     if cfg['llm'].get('api_key'):
         raise ValueError('Credentials must be environment-only')
     for section in ('explorer', 'reflection'):
@@ -710,7 +737,9 @@ def main():
                 return
             audit()
             if args.phase == 'full':
-                if not os.getenv('DEEPSEEK_API_KEY'):
+                configured_llm = (read(OUT / 'config.json') or {}).get('llm') or {}
+                api_key_env = configured_llm.get('api_key_env') or 'OPENAI_API_KEY'
+                if not os.getenv(api_key_env):
                     raise ValueError('Missing process credential')
                 train()
                 evaluate()
