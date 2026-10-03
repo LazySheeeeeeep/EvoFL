@@ -466,12 +466,17 @@ def _download_github_archive(url: str, destination: Path) -> None:
                 "--connect-timeout",
                 "15",
                 "--max-time",
-                "180",
+                "600",
+                "--retry",
+                "2",
+                "--retry-all-errors",
+                "--retry-delay",
+                "5",
                 "--output",
                 str(destination),
                 url,
             ],
-            timeout=190,
+            timeout=1830,
         )
         return
     with urllib.request.urlopen(url, timeout=180) as response:

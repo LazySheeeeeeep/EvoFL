@@ -1411,7 +1411,7 @@ def _finish_tool_schema() -> dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 5,
-                "description": "Up to five ranked path::qualified_name candidates supported by repository observations.",
+                "description": "Up to five ranked path::qualified_name candidates supported by repository observations. Nested functions use their full path::Class.outer.inner identity; their enclosing function is a separate candidate, not a substitute.",
             },
             "summary": {"type": "string", "description": "Brief code-evidence summary."},
             "thought": {"type": "string", "description": "Optional concise decision summary."},
@@ -1549,6 +1549,11 @@ def run_explorer(
     prompt_path = resolve_path(explorer_cfg.get("system_prompt_path", "prompt_records/explorer/explorer_system_v0.txt"))
     bank = skill_bank or make_skill_bank(config)
     client = llm_client or OpenAICompatibleClient.from_config(config.get("llm", {}))
+    if str(explorer_cfg.get("workflow_version") or "").lower() == "v5":
+        from .v5_agent import V5ExplorerAgent
+
+        return V5ExplorerAgent(llm_client=client, skill_bank=bank, config=config,
+                               system_prompt=prompt_path.read_text(encoding="utf-8")).run(task)
     if str(explorer_cfg.get("workflow_version") or "v2").lower() == "v3":
         from .v3_agent import V3ExplorerAgent
 

@@ -10,22 +10,83 @@ DIFF_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def functions_from_patch(patch: str, repo_root: str | Path) -> list[str]:
-    """Map Python patch hunks to enclosing function or class identities."""
+def functions_from_patch(patch: str, repo_root: str | Path, *, source_side: str = "old") -> list[str]:
+    """Return function identities from actual changed lines on both patch sides."""
+    return symbols_from_patch(patch, repo_root, source_side=source_side)["functions"]
+
+
+def symbols_from_patch(patch: str, repo_root: str | Path, *, source_side: str = "old") -> dict[str, Any]:
+    """Reconstruct the other side in memory; never modify the inspected tree."""
 
     root = Path(repo_root)
-    identities: set[str] = set()
+    if source_side not in {"old", "new"}:
+        raise ValueError("source_side must be old or new")
+    groups: dict[str, set[str]] = {"functions": set(), "classes": set(), "module_files": set()}
+    evidence = []
     for file_info in parse_patch_files(patch):
-        path = str(file_info["new_path"])
+        path = str(file_info["new_path"] if source_side == "new" else file_info["old_path"])
         if not path.endswith(".py"):
             continue
-        spans = python_symbol_spans(root / path)
+        resolved = (root / path).resolve()
+        if not resolved.is_relative_to(root.resolve()):
+            raise ValueError(f"Patch path escapes repository: {path}")
+        exists_on_side = not file_info.get("new_file" if source_side == "old" else "deleted_file", False)
+        if exists_on_side and not resolved.is_file():
+            raise ValueError(f"Patch source is missing: {path}")
+        current = resolved.read_text(encoding="utf-8", errors="replace").splitlines() if exists_on_side else []
+        other = reconstruct_other_side(current, file_info["hunks"], source_side)
+        sources = {source_side: current, "old" if source_side == "new" else "new": other}
+        spans_by_side = {side: _python_symbol_spans_text("\n".join(lines), strict=True)
+                         for side, lines in sources.items()}
         for hunk in file_info["hunks"]:
-            for line in changed_base_lines(hunk):
-                qualified_name = enclosing_symbol(spans, line)
-                if qualified_name:
-                    identities.add(f"{path}::{qualified_name}")
-    return sorted(identities)
+            positions = {"old": hunk["old_start"], "new": hunk["new_start"]}
+            for raw in hunk["lines"]:
+                prefix = raw[:1]
+                if prefix not in {"+", "-", " "}:
+                    continue
+                side = "old" if prefix == "-" else "new"
+                if prefix in {"+", "-"} and raw[1:].strip() and not raw[1:].lstrip().startswith("#"):
+                    line = positions[side]
+                    matches = [s for s in spans_by_side[side] if s["start"] <= line <= s["end"]]
+                    symbol = max(matches, key=lambda s: s["depth"]) if matches else None
+                    kind = symbol["kind"] if symbol else "module"
+                    name = symbol["qualified_name"] if symbol else None
+                    groups[{"function": "functions", "class": "classes", "module": "module_files"}[kind]].add(
+                        f"{path}::{name}" if name else path)
+                    evidence.append({"path": path, "side": side, "line": line, "kind": kind, "symbol": name})
+                if prefix in {"-", " "}:
+                    positions["old"] += 1
+                if prefix in {"+", " "}:
+                    positions["new"] += 1
+    return {**{key: sorted(values) for key, values in groups.items()}, "evidence": evidence}
+
+
+def reconstruct_other_side(current: list[str], hunks: list[dict], side: str) -> list[str]:
+    result, cursor = [], 0
+    own = "-" if side == "old" else "+"
+    opposite = "+" if side == "old" else "-"
+    for hunk in hunks:
+        start = int(hunk[side + "_start"])
+        expected = [s[1:] for s in hunk["lines"] if s[:1] in {" ", own}]
+        replacement = [s[1:] for s in hunk["lines"] if s[:1] in {" ", opposite}]
+        offset = max(0, start - 1) if expected else start
+        if offset < cursor or offset > len(current) or current[offset:offset + len(expected)] != expected:
+            # git apply can relocate a hunk. Accept only a unique exact match,
+            # never fuzzy context or an inferred neighboring function.
+            matches = [i for i in range(cursor, len(current) - len(expected) + 1)
+                       if expected and current[i:i + len(expected)] == expected]
+            if len(matches) != 1:
+                raise ValueError(f"Patch does not match supplied {side} source at line {start}")
+            offset = matches[0]
+        other_offset = offset + len(result) - cursor
+        hunk[side + "_start"] = offset + 1 if expected else offset
+        other_side = "new" if side == "old" else "old"
+        hunk[other_side + "_start"] = other_offset + 1 if replacement else other_offset
+        result.extend(current[cursor:offset])
+        result.extend(replacement)
+        cursor = offset + len(expected)
+    result.extend(current[cursor:])
+    return result
 
 
 def parse_patch_files(patch: str) -> list[dict[str, Any]]:
@@ -39,6 +100,10 @@ def parse_patch_files(patch: str) -> list[dict[str, Any]]:
             continue
         if current is None:
             continue
+        if line.startswith("new file mode"):
+            current["new_file"] = True
+        if line.startswith("deleted file mode"):
+            current["deleted_file"] = True
         hunk_match = HUNK_RE.match(line)
         if hunk_match:
             current["hunks"].append(
@@ -70,9 +135,12 @@ def changed_base_lines(hunk: dict[str, Any]) -> list[int]:
             pending_addition = False
         elif prefix == "+":
             # Added lines do not exist in the base tree. Associate an addition
-            # block with the closest surviving base line once.
+            # block with the closest *preceding* surviving base line once.
+            # Using ``old_line`` points at the following line. At a function
+            # boundary that can falsely attribute a deleted tail of one
+            # function to the definition of the next one.
             if not pending_addition:
-                changed.append(max(1, old_line))
+                changed.append(max(1, old_line - 1))
                 pending_addition = True
         else:
             old_line += 1
@@ -83,9 +151,15 @@ def changed_base_lines(hunk: dict[str, Any]) -> list[int]:
 def python_symbol_spans(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    return _python_symbol_spans_text(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _python_symbol_spans_text(text: str, *, strict: bool = False) -> list[dict[str, Any]]:
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-    except SyntaxError:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        if strict:
+            raise ValueError(f"Cannot map Python patch scopes: {exc}") from exc
         return []
     spans: list[dict[str, Any]] = []
 
@@ -97,7 +171,7 @@ def python_symbol_spans(path: Path) -> list[dict[str, Any]]:
                     {
                         "qualified_name": qualified_name,
                         "kind": "class" if isinstance(child, ast.ClassDef) else "function",
-                        "start": int(getattr(child, "lineno", 1)),
+                        "start": min([child.lineno] + [d.lineno for d in child.decorator_list]),
                         "end": _node_end_line(child),
                         "depth": len(parents),
                     }
@@ -147,12 +221,13 @@ def enclosing_symbol(spans: list[dict[str, Any]], line: int) -> str | None:
 def evaluate_ranked_functions(
     ranked_functions: list[str],
     ground_truth_functions: list[str],
+    *, strict: bool = False,
 ) -> dict[str, Any]:
     rank: int | None = None
     matched_ground_truth: str | None = None
     for index, prediction in enumerate(ranked_functions, start=1):
         for ground_truth in ground_truth_functions:
-            if function_identity_matches(prediction, ground_truth):
+            if function_identity_matches(prediction, ground_truth, strict=strict):
                 rank = index
                 matched_ground_truth = ground_truth
                 break
@@ -168,9 +243,15 @@ def evaluate_ranked_functions(
     }
 
 
-def function_identity_matches(prediction: str, ground_truth: str) -> bool:
+def function_identity_matches(prediction: str, ground_truth: str, *, strict: bool = False) -> bool:
     prediction_file, prediction_name = split_function_identity(prediction)
     truth_file, truth_name = split_function_identity(ground_truth)
+    # The outer ``path::qualified_name`` separator is required by Explorer's
+    # output contract. Some providers nevertheless render a class method as
+    # ``Class::method`` inside the qualified name. Both forms identify the
+    # same Python symbol, so canonicalize only the inner spelling here.
+    prediction_name = prediction_name.replace("::", ".")
+    truth_name = truth_name.replace("::", ".")
     prediction_file, prediction_name = normalize_python_module_identity(
         prediction,
         prediction_file,
@@ -179,6 +260,8 @@ def function_identity_matches(prediction: str, ground_truth: str) -> bool:
     )
     if prediction_file != truth_file:
         return False
+    if strict:
+        return bool(prediction_name and truth_name and prediction_name == truth_name)
     return (
         prediction_name == truth_name
         or bool(prediction_name and truth_name.endswith("." + prediction_name))

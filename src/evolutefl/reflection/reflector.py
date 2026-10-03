@@ -5,6 +5,7 @@ import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from evolutefl.json_utils import extract_json_object, write_json
 from evolutefl.skills.schema import (
@@ -14,7 +15,7 @@ from evolutefl.skills.schema import (
     validate_fault_knowledge,
     validate_portable_skill_card,
 )
-from evolutefl.skills.fault_taxonomy import validate_fault_family
+from evolutefl.skills.fault_taxonomy import normalize_retrieval_families, validate_fault_family
 
 
 UPDATE_DECISIONS = ("create_new", "rewrite_existing", "preserve_existing", "no_update")
@@ -144,6 +145,10 @@ def run_reflector(
     skill_types: tuple[str, ...] | None = None,
     strict_final_cards: bool = False,
     isolate_skill_errors_on_final_attempt: bool = False,
+    max_tokens: int | None = None,
+    truncation_retries: int = 0,
+    truncation_retry_max_tokens: int = 8192,
+    disable_deepseek_thinking_on_truncation: bool = True,
 ) -> dict[str, Any]:
     payload = {
         "trajectory_evidence": trajectory_evidence,
@@ -158,10 +163,13 @@ def run_reflector(
     debug: list[dict[str, Any]] = []
     last_error: Exception | None = None
     for attempt in range(1, max(1, attempts) + 1):
-        response = llm_client.chat(
+        response, request_attempts = _reflector_chat_with_truncation_recovery(
+            llm_client=llm_client,
             messages=messages,
-            tool_choice="none",
-            response_format={"type": "json_object"},
+            max_tokens=max_tokens,
+            truncation_retries=truncation_retries,
+            truncation_retry_max_tokens=truncation_retry_max_tokens,
+            disable_deepseek_thinking=disable_deepseek_thinking_on_truncation,
         )
         content = response.get("content") or ""
         try:
@@ -176,12 +184,23 @@ def run_reflector(
                     and attempt == max(1, attempts)
                 ),
             )
+            for update in result.get("materialized_updates", []):
+                if (update.get("skill_type") == "fault_skill"
+                        and update.get("operation") == "create"
+                        and evolution_queries.get("fault_family")
+                        and update["skill"]["fault_family"] != evolution_queries["fault_family"]):
+                    raise ValueError(
+                        "New Skill primary family must be " + evolution_queries["fault_family"]
+                        + "; other applicable families belong in retrieval_families."
+                    )
             if output_path:
-                write_json(output_path, {"attempt": attempt, "reflector_output": result, "raw_response": content})
+                write_json(output_path, {"attempt": attempt, "request_attempts": request_attempts,
+                                         "reflector_output": result, "raw_response": content})
             return result
         except Exception as exc:  # noqa: BLE001 - one protocol repair is isolated here.
             last_error = exc
-            debug.append({"attempt": attempt, "error": str(exc), "raw_response": content})
+            debug.append({"attempt": attempt, "request_attempts": request_attempts,
+                          "error": str(exc), "raw_response": content})
             messages = base_messages + [
                 {
                     "role": "user",
@@ -194,6 +213,57 @@ def run_reflector(
     return fallback
 
 
+def _reflector_chat_with_truncation_recovery(
+    *,
+    llm_client: Any,
+    messages: list[dict[str, Any]],
+    max_tokens: int | None,
+    truncation_retries: int,
+    truncation_retry_max_tokens: int,
+    disable_deepseek_thinking: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Replay a truncated JSON request before attempting protocol repair."""
+
+    base_budget = int(max_tokens or getattr(llm_client, "max_tokens", 4096))
+    attempts_log: list[dict[str, Any]] = []
+    response: dict[str, Any] = {}
+    for recovery in range(max(0, int(truncation_retries)) + 1):
+        budget = base_budget if recovery == 0 else max(
+            base_budget, int(truncation_retry_max_tokens)
+        )
+        extra_body = dict(getattr(llm_client, "extra_body", {}) or {})
+        thinking_disabled = False
+        if recovery and disable_deepseek_thinking and _is_official_deepseek_v4(llm_client):
+            extra_body["thinking"] = {"type": "disabled"}
+            thinking_disabled = True
+        response = llm_client.chat(
+            messages=messages,
+            tool_choice="none",
+            response_format={"type": "json_object"},
+            max_tokens=budget,
+            extra_body=extra_body,
+        )
+        raw = response.get("raw") or {}
+        choice = (raw.get("choices") or [{}])[0]
+        attempts_log.append({
+            "attempt": recovery + 1,
+            "max_tokens": budget,
+            "finish_reason": choice.get("finish_reason"),
+            "thinking_disabled": thinking_disabled,
+            "usage": raw.get("usage", {}),
+        })
+        if choice.get("finish_reason") != "length":
+            return response, attempts_log
+    return response, attempts_log
+
+
+def _is_official_deepseek_v4(llm_client: Any) -> bool:
+    return (
+        urlsplit(str(getattr(llm_client, "base_url", ""))).hostname == "api.deepseek.com"
+        and str(getattr(llm_client, "model", "")).startswith("deepseek-v4-")
+    )
+
+
 def _reflector_repair_instruction(
     skill_types: tuple[str, ...] | None, error: Exception
 ) -> str:
@@ -201,7 +271,8 @@ def _reflector_repair_instruction(
     if requested == ("fault_skill",):
         contract = (
             "Return only skill_updates.fault_skill. create_new and rewrite_existing provide a "
-            "complete card with fault_family, fault_subtype, title, trigger, and knowledge."
+            "complete card with fault_family, retrieval_families, fault_subtype, title, trigger, and knowledge. "
+            "Rewrite retains the selected candidate's primary family and subtype; retrieval_families lists its retrieval entries."
         )
     elif requested == ("strategy_skill",):
         contract = (
@@ -755,7 +826,16 @@ def _validate_skill_update(
             }, _materialize_update(
                 update_index, "preserve", skill_type, target, None, rationale, outcome_type, source_case
             )
+        if skill_type == "fault_skill" and isinstance(raw_skill, dict):
+            raw_skill = deepcopy(raw_skill)
+            if "retrieval_families" not in raw_skill:
+                raw_skill["retrieval_families"] = normalize_retrieval_families(
+                    candidate.get("retrieval_families"), candidate.get("fault_family"))
         skill = _validate_complete_skill(raw_skill, skill_type, strict_final_cards=strict_final_cards)
+        if skill_type == "fault_skill" and any(
+            skill[key] != candidate.get(key) for key in ("fault_family", "fault_subtype")
+        ):
+            raise ValueError("Fault rewrite retains the selected candidate's primary family and subtype.")
         operation = "rewrite"
 
     normalized = {
@@ -778,6 +858,7 @@ def _validate_complete_skill(
     if skill_type == "fault_skill":
         skill = {
             "fault_family": validate_fault_family(raw.get("fault_family")),
+            "retrieval_families": normalize_retrieval_families(raw.get("retrieval_families"), raw.get("fault_family")),
             "fault_subtype": str(raw.get("fault_subtype") or "").strip(),
             "title": str(raw.get("title") or "").strip(),
             "trigger": str(raw.get("trigger") or "").strip(),

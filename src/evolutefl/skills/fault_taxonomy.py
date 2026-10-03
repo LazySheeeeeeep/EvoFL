@@ -44,6 +44,16 @@ def compact_fault_taxonomy() -> list[dict[str, str]]:
     ]
 
 
+def normalize_retrieval_families(value: Any, primary: str) -> list[str]:
+    """A Skill always has its primary entry; aliases share the same identity."""
+    primary = validate_fault_family(primary)
+    if value is None:
+        return [primary]
+    if not isinstance(value, list) or not value:
+        raise ValueError("retrieval_families must be a non-empty list of fault family IDs.")
+    return list(dict.fromkeys([primary, *[validate_fault_family(item) for item in value]]))
+
+
 def render_fault_taxonomy() -> str:
     return "\n".join(
         f"- {family}: {FAULT_FAMILY_DEFINITIONS[family]}"

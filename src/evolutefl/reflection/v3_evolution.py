@@ -612,8 +612,9 @@ def _select_fault_evolution_target(
     catalog: list[dict[str, Any]],
     out_dir: Path,
     config: dict[str, Any],
+    routing_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Select one same-family update target without exposing catalog knowledge."""
+    """Select one update target without exposing catalog knowledge."""
 
     family = validate_fault_family(fault_family)
     catalog_ids = {str(item.get("skill_id") or "") for item in catalog}
@@ -638,6 +639,8 @@ def _select_fault_evolution_target(
         "fault_subtype_query": str(fault_subtype_query or "").strip(),
         "candidates": catalog,
     }
+    if routing_context is not None:
+        payload["routing_context"] = routing_context
     base_messages = [
         {"role": "system", "content": prompt_path.read_text(encoding="utf-8")},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

@@ -58,7 +58,16 @@ def run_case_evolution(
     reflect_success: bool = False,
     reflect_failure: bool = True,
     fault_only: bool = False,
+    repo_path: str | Path | None = None,
+    patch_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if str((config.get("explorer") or {}).get("workflow_version") or "").lower() == "v5":
+        from .v5_evolution import run_v5_case_evolution
+
+        return run_v5_case_evolution(case_run_dir=case_run_dir, repo=repo, issue=issue, config=config,
+            llm_client=llm_client, repo_path=repo_path, patch_metadata=patch_metadata,
+            ground_truth_patch=ground_truth_patch, ground_truth_functions=ground_truth_functions,
+            ground_truth_locations=ground_truth_locations, output_dir=output_dir)
     if str((config.get("explorer") or {}).get("workflow_version") or "v2").lower() == "v3":
         from .v3_evolution import run_v3_case_evolution
 

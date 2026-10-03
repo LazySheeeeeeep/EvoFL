@@ -238,19 +238,29 @@ def read_file(repo_path: str, path: str, start_line: int | None = None, end_line
     if target.is_dir():
         raise IsADirectoryError(f"Path is a directory, not a file: {path}")
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-    max_lines = int(max_lines or 200)
+    max_lines = min(200, max(1, int(max_lines or 200)))
     start = max(1, int(start_line or 1))
     end = int(end_line or min(len(lines), start + max_lines - 1))
     end = min(end, start + max_lines - 1, len(lines))
-    snippet = [
-        {"line": line_no, "text": lines[line_no - 1]}
-        for line_no in range(start, end + 1)
-    ]
+    requested_end = min(int(end_line) if end_line is not None else len(lines), len(lines))
+    snippet, chars = [], 0
+    for line_no in range(start, end + 1):
+        text = lines[line_no - 1]
+        # Always deliver at least one complete line, even an unusually long one.
+        if snippet and chars + len(text) > 16000:
+            break
+        snippet.append({"line": line_no, "text": text})
+        chars += len(text)
+    delivered_end = snippet[-1]["line"] if snippet else None
     return {
         "path": path,
         "start_line": start,
-        "end_line": end,
+        "end_line": delivered_end,
         "content": snippet,
+        "total_lines": len(lines),
+        "requested_end_line": requested_end,
+        "next_start_line": delivered_end + 1 if delivered_end is not None and delivered_end < requested_end else None,
+        "truncated": delivered_end is not None and delivered_end < requested_end,
     }
 
 
@@ -310,9 +320,9 @@ def _grep_schema(*, include_repo_path: bool = True) -> dict[str, Any]:
 def _read_file_schema(*, include_repo_path: bool = True) -> dict[str, Any]:
     properties = {
         "path": {"type": "string", "description": "File path relative to repo_path."},
-        "start_line": {"type": "integer", "description": "Optional 1-based start line."},
-        "end_line": {"type": "integer", "description": "Optional 1-based end line."},
-        "max_lines": {"type": "integer", "description": "Maximum number of lines to return."},
+        "start_line": {"type": "integer", "description": "Inclusive 1-based start, default 1. Set explicitly for a known location or use next_start_line to continue a previous page."},
+        "end_line": {"type": "integer", "description": "Inclusive end of the requested range. Setting only end_line still starts at line 1. Returned end_line is the actual last delivered line."},
+        "max_lines": {"type": "integer", "description": "Lines per page, default and maximum 200. A source-character budget may shorten the page; follow next_start_line for the remainder."},
     }
     required = ["path"]
     if include_repo_path:
@@ -320,7 +330,9 @@ def _read_file_schema(*, include_repo_path: bool = True) -> dict[str, Any]:
         required = ["repo_path", *required]
     return openai_function_tool(
         name="read_file",
-        description="Read a bounded line range from a repository file.",
+        description=("Read a source page with complete numbered lines. For lines 380-430, pass start_line=380 and end_line=430. "
+                     "Omitting start_line reads from line 1, even if end_line is large. "
+                     "Continue with next_start_line; use find_symbol/read_symbol for a known Python function."),
         properties=properties,
         required=required,
     )

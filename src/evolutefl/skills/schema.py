@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from .fault_taxonomy import validate_fault_family
+from .fault_taxonomy import normalize_retrieval_families, validate_fault_family
 
 SKILL_TYPES = ("project_skill", "fault_skill", "strategy_skill")
 SKILL_STATUSES = ("active", "superseded", "rejected")
@@ -60,6 +60,7 @@ class DimensionSkill:
     repo_id: str | None = None
     fault_family: str | None = None
     fault_subtype: str | None = None
+    retrieval_families: list[str] | None = None
 
     def __post_init__(self) -> None:
         self.knowledge = normalize_skill_knowledge(self.knowledge, self.skill_type)
@@ -67,6 +68,7 @@ class DimensionSkill:
             self.repo_id = normalize_repo_id(self.repo_id) if self.repo_id else None
         if self.skill_type == "fault_skill":
             self.fault_family = validate_fault_family(self.fault_family)
+            self.retrieval_families = normalize_retrieval_families(self.retrieval_families, self.fault_family)
             self.fault_subtype = str(self.fault_subtype or self.value).strip()
             if not self.fault_subtype:
                 raise ValueError("Fault Skill requires fault_subtype.")
@@ -125,6 +127,7 @@ class DimensionSkill:
             repo_id=repo_id,
             fault_family=str(fault_family or "").strip() or None,
             fault_subtype=fault_subtype,
+            retrieval_families=normalized.get("retrieval_families") if skill_type == "fault_skill" else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -144,6 +147,7 @@ class DimensionSkill:
         if self.skill_type == "fault_skill":
             payload["fault_family"] = self.fault_family
             payload["fault_subtype"] = self.fault_subtype
+            payload["retrieval_families"] = self.retrieval_families
         elif self.skill_type == "project_skill" and self.repo_id:
             payload["repo_id"] = self.repo_id
         else:
@@ -170,6 +174,7 @@ class DimensionSkill:
         if self.skill_type == "fault_skill":
             payload["fault_family"] = self.fault_family
             payload["fault_subtype"] = self.fault_subtype
+            payload["retrieval_families"] = self.retrieval_families
         elif self.skill_type == "project_skill" and self.repo_id:
             payload["repo_id"] = self.repo_id
         else:
@@ -375,6 +380,7 @@ def validate_portable_skill_card(raw: Any, *, skill_type: str) -> dict[str, Any]
             raise ValueError("Finalized Fault Skill requires fault_subtype.")
         return {
             "fault_family": family,
+            "retrieval_families": normalize_retrieval_families(raw.get("retrieval_families"), family),
             "fault_subtype": subtype,
             "title": title,
             "trigger": trigger,

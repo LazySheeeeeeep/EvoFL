@@ -1,6 +1,6 @@
 Select at most one Fault Skill from the supplied catalog for the already classified fault family.
 
-The catalog contains only skill IDs, fine-grained subtypes, titles, and triggers. Select a card when the current case has the same causal failure mechanism and a compatible investigation direction. Repository domains, API names, data types, and concrete symbols may differ. Use the reported behavior and observed responsibility path to establish the mechanism match. A shared top-level family alone is not enough. Return null when no card is a reliable mechanism-level match.
+The catalog contains skill IDs, fine-grained subtypes, titles, triggers, and routing metadata. Each card is reachable through the requested family; its stored primary fault_family may differ because multiple retrieval entries share one Skill. Select a card when the current case has the same causal failure mechanism and a compatible investigation direction. Repository domains, API names, data types, and concrete symbols may differ. Use the reported behavior and observed responsibility path to establish the mechanism match. A shared top-level family alone is not enough. Return null when no card is a reliable mechanism-level match.
 
 Return exactly one JSON object:
 {"selected_skill_id":"id or null","reason":"short evidence-based reason"}

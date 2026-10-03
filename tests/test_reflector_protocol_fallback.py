@@ -34,6 +34,49 @@ def test_reflector_protocol_failure_returns_no_update(tmpdir) -> None:
     assert all(item["decision"] == "no_update" for item in output["skill_updates"].values())
 
 
+def test_reflector_replays_truncated_deepseek_json_without_protocol_repair(tmpdir) -> None:
+    output_path = tmpdir.join("reflector_debug.json")
+    fake = FakeLLMClient([
+        {
+            "content": "",
+            "raw": {"choices": [{"finish_reason": "length", "message": {
+                "reasoning_content": "unfinished"
+            }}], "usage": {"completion_tokens": 4096}},
+        },
+        {
+            "content": (
+                '{"case_summary":"No portable lesson.","outcome_type":"success",'
+                '"skill_updates":{"fault_skill":{"decision":"no_update",'
+                '"target_skill_id":null,"rationale":"Existing guidance is sufficient.",'
+                '"skill":null,"no_update_reason":"Existing guidance is sufficient."}}}'
+            ),
+            "raw": {"choices": [{"finish_reason": "stop", "message": {}}]},
+        },
+    ])
+    fake.base_url = "https://api.deepseek.com"
+    fake.model = "deepseek-v4-flash"
+    fake.max_tokens = 4096
+
+    output = run_reflector(
+        trajectory_evidence={"outcome": {"label": "success"}, "case": {"instance_id": "case1"}},
+        evolution_queries={"fault_family": "validation_control", "fault_subtype_query": "branch outcome"},
+        skill_search_context={"candidate_target_skills": []},
+        llm_client=fake,
+        prompt="Return JSON.",
+        attempts=1,
+        output_path=str(output_path),
+        skill_types=("fault_skill",),
+        truncation_retries=1,
+        truncation_retry_max_tokens=8192,
+    )
+
+    assert output["skill_updates"]["fault_skill"]["decision"] == "no_update"
+    assert len(fake.calls) == 2
+    assert fake.calls[0]["messages"] == fake.calls[1]["messages"]
+    assert fake.calls[1]["max_tokens"] == 8192
+    assert fake.calls[1]["extra_body"]["thinking"] == {"type": "disabled"}
+
+
 def test_evolution_query_retries_when_query_is_too_long() -> None:
     fake = FakeLLMClient(
         [

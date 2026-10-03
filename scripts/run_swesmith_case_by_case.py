@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -54,9 +56,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.prepare_only:
         prepared = []
         for case in cases:
-            repo_dir = out_dir / "repos" / _safe_name(case["image_name"])
-            repo_dir = materialize_repo(case["image_name"], repo_dir, force=args.force_recopy_repo)
-            prepared.append({"instance_id": case["instance_id"], "repo_dir": str(repo_dir), "image_name": case["image_name"]})
+            repo_dir, source_state = materialize_swesmith_case(
+                case,
+                out_dir / "repos",
+                force=args.force_recopy_repo,
+            )
+            prepared.append({
+                "instance_id": case["instance_id"],
+                "repo_dir": str(repo_dir),
+                "image_name": case["image_name"],
+                "source_state": source_state,
+            })
         write_json(out_dir / "prepare_summary.json", {"cases": prepared})
         print(json.dumps({"status": "prepared", "output_dir": str(out_dir), "cases": prepared}, ensure_ascii=False, indent=2))
         return 0
@@ -101,7 +111,9 @@ def main(argv: list[str] | None = None) -> int:
             write_json(out_dir / "progress_summary.json", {"cases": summaries})
             continue
         case_dir = out_dir / "cases" / instance_id
-        repo_dir = out_dir / "repos" / _safe_name(case["image_name"])
+        reused_result = resume_case_artifacts(case_dir, out_dir) if args.resume else None
+        repo_parent = Path(args.prepared_repos_dir).resolve() if args.prepared_repos_dir else out_dir / "repos"
+        repo_dir = swe_smith_case_repo_dir(repo_parent, case)
         if not args.resume and case_dir.exists() and any(case_dir.iterdir()):
             raise RuntimeError(
                 f"Refusing to overwrite existing case artifacts: {case_dir}. "
@@ -117,17 +129,26 @@ def main(argv: list[str] | None = None) -> int:
             "evolution_status": "not_started",
         }
         try:
-            repo_dir = materialize_repo(case["image_name"], repo_dir, force=args.force_recopy_repo)
+            repo_dir, source_state = materialize_swesmith_case(
+                case,
+                repo_parent,
+                force=args.force_recopy_repo,
+                require_existing=bool(args.prepared_repos_dir),
+            )
+            summary["source_state"] = source_state
             write_json(case_dir / "task.json", case)
-            ground_truth_functions = functions_from_patch(case.get("patch", ""), repo_dir)
+            # All SWE-smith Explorer runs now inspect the clean_to_buggy patch
+            # result, so function ground truth must use the buggy/new side.
+            ground_truth_functions = functions_from_patch(case.get("patch", ""), repo_dir, source_side="new")
             summary["ground_truth_functions"] = ground_truth_functions
-            explorer_result = run_explorer(
+            explorer_result = reused_result if reused_result is not None else run_explorer(
                 task={
                     "instance_id": instance_id,
                     "repo_path": str(repo_dir),
                     "repo": case["repo"],
                     "base_commit": case.get("base_commit", ""),
                     "bug_report": case["problem_statement"],
+                    "source_state": source_state,
                     "run_dir": str(case_dir),
                 },
                 config=config,
@@ -135,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
                 skill_bank=skill_bank,
             )
             summary["explorer_status"] = explorer_result.get("status")
+            summary["explorer_reused"] = reused_result is not None
             summary["ranked_functions"] = explorer_result.get("ranked_functions", [])
             summary["function_metrics"] = evaluate_ranked_functions(
                 summary["ranked_functions"],
@@ -146,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 evolution = run_case_evolution(
                     case_run_dir=case_dir,
+                    repo_path=repo_dir,
+                    patch_metadata={"source": args.dataset_name, "direction": "clean_to_buggy"},
                     repo=case["repo"],
                     issue=case["problem_statement"],
                     config=config,
@@ -156,9 +180,12 @@ def main(argv: list[str] | None = None) -> int:
                     output_dir=case_dir / "case_evolution",
                     reflect_success=args.reflect_success,
                 )
-                summary["evolution_status"] = "completed"
+                summary["evolution_status"] = evolution.get("status", "completed")
                 summary["evolution"] = {
                     "eligible": evolution.get("eligible"),
+                    "failure_stage": evolution.get("failure_stage"),
+                    "investigation_status": evolution.get("investigation_status"),
+                    "investigation_tool_calls": evolution.get("investigation_tool_calls"),
                     "reason": evolution.get("reason"),
                     "outcome": evolution.get("outcome", {}),
                     "updated_skill_ids": evolution.get("updated_skill_ids", []),
@@ -172,13 +199,15 @@ def main(argv: list[str] | None = None) -> int:
                     "reflector_fault_family": evolution.get("reflector_fault_family"),
                     "fault_family_consistent": evolution.get("fault_family_consistent"),
                     "fault_target_selection": evolution.get("fault_target_selection", {}),
+                    "retrieval_entry_changes": evolution.get("retrieval_entry_changes", []),
+                    "fault_catalog_search_trace": evolution.get("fault_catalog_search_trace", {}),
                     "applied_updates": [
                         {
-                            "operation": update.get("operation"),
-                            "skill_type": update.get("skill_type"),
+                            "operation": update.get("action"),
+                            "skill_type": "fault_skill",
                             "updated_skill_id": update.get("updated_skill_id"),
                         }
-                        for update in evolution.get("materialized_updates", [])
+                        for update in evolution.get("applied_updates", [])
                     ],
                 }
                 if args.rebuild_embeddings_after_case:
@@ -258,7 +287,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--prepare-only", action="store_true")
-    parser.add_argument("--max-steps", default="none", help="Explorer step limit. Use 'none' for no step limit.")
+    parser.add_argument("--prepared-repos-dir", help="Explicit previously materialized repositories with image markers; never used implicitly.")
+    parser.add_argument("--max-steps", default="none", help="Explorer step limit. V5 uses 30 when this is none.")
     parser.add_argument("--case-timeout-seconds", type=float, default=900.0)
     parser.add_argument("--reset-skill-bank", action="store_true")
     parser.add_argument("--enable-embedding", action="store_true")
@@ -340,7 +370,8 @@ def _windows_host_path(path: Path) -> str:
     return str(path)
 
 
-def select_cases(sample_size: int, seed: int, dataset_name: str, split: str, prefer_local_images: bool) -> list[dict[str, Any]]:
+def select_cases(sample_size: int, seed: int, dataset_name: str, split: str, prefer_local_images: bool,
+                 exclude_instance_ids: set[str] | None = None) -> list[dict[str, Any]]:
     try:
         from datasets import load_dataset
     except ImportError as exc:
@@ -350,9 +381,15 @@ def select_cases(sample_size: int, seed: int, dataset_name: str, split: str, pre
     unique_by_image: list[dict[str, Any]] = []
     fallback: list[dict[str, Any]] = []
     seen_images: set[str] = set()
-    rows = list(ds)
-    random.Random(seed).shuffle(rows)
-    for row in rows:
+    # Shuffle lightweight indices instead of expanding the whole Arrow dataset
+    # into Python dictionaries. Large SWE-smith splits otherwise consume most
+    # of WSL memory before the first selected case starts.
+    row_indices = list(range(len(ds)))
+    random.Random(seed).shuffle(row_indices)
+    for row_index in row_indices:
+        row = ds[row_index]
+        if row.get("instance_id") in (exclude_instance_ids or set()):
+            continue
         image = row.get("image_name", "")
         # V3 reveals the issue only after repository orientation. A blank
         # problem_statement cannot exercise its Fault Skill stage and would
@@ -367,7 +404,7 @@ def select_cases(sample_size: int, seed: int, dataset_name: str, split: str, pre
             "image_name": image,
             "problem_statement": row.get("problem_statement", ""),
             "patch": row.get("patch", ""),
-            "base_commit": row.get("repo", "").split(".")[-1] if row.get("repo") else "",
+            "base_commit": row.get("base_commit") or "",
         }
         if image not in seen_images:
             unique_by_image.append(case)
@@ -422,10 +459,10 @@ def cached_repo_images() -> set[str]:
     return images
 
 
-def materialize_repo(image_name: str, repo_dir: Path, *, force: bool = False) -> Path:
-    if not force and is_usable_source_repo(repo_dir):
+def materialize_repo(image_name: str, repo_dir: Path, *, force: bool = False, allow_cache: bool = True) -> Path:
+    if not force and is_usable_source_repo(repo_dir) and (allow_cache or (repo_dir / ".evolutefl_materialized").exists()):
         return repo_dir
-    cached = find_cached_repo(image_name, exclude=repo_dir)
+    cached = find_cached_repo(image_name, exclude=repo_dir) if allow_cache and not force else None
     if cached is not None and not force:
         return cached
     if repo_dir.exists():
@@ -435,13 +472,157 @@ def materialize_repo(image_name: str, repo_dir: Path, *, force: bool = False) ->
     run(["docker", "rm", "-f", container_name], check=False)
     run(["docker", "create", "--name", container_name, image_name, "bash", "-lc", "sleep 1"])
     try:
-        materialize_container_testbed(container_name, repo_dir)
+        materialize_container_testbed(container_name, repo_dir, source_only=not allow_cache)
+        (repo_dir / ".evolutefl_materialized").write_text(image_name, encoding="utf-8")
     finally:
         run(["docker", "rm", "-f", container_name], check=False)
     return repo_dir
 
 
-def materialize_container_testbed(container_name: str, repo_dir: Path) -> None:
+def swe_smith_case_repo_dir(repo_parent: Path, case: dict[str, Any]) -> Path:
+    """Keep each mutation in an isolated repository copy.
+
+    SWE-smith may derive several mutations from one Docker image. A repository
+    named only after that image would let one mutation leak into another case.
+    """
+
+    instance_id = str(case.get("instance_id") or "")
+    if not instance_id:
+        raise ValueError("SWE-smith case is missing instance_id")
+    return repo_parent / _safe_name(instance_id)
+
+
+def materialize_swesmith_case(
+    case: dict[str, Any],
+    repo_parent: Path,
+    *,
+    force: bool = False,
+    require_existing: bool = False,
+) -> tuple[Path, dict[str, Any]]:
+    """Materialize the exact buggy source state for one SWE-smith mutation.
+
+    SWE-smith Docker images contain the clean base repository while each case
+    patch mutates that base from clean to buggy. Apply the mutation only after
+    copying the image, never to a shared cached repository.
+    """
+
+    image_name = str(case.get("image_name") or "")
+    patch = str(case.get("patch") or "")
+    if not image_name or not patch.strip():
+        raise ValueError("SWE-smith case requires non-empty image_name and clean_to_buggy patch")
+    repo_dir = swe_smith_case_repo_dir(repo_parent, case)
+    expected = {
+        "format": "swe_smith_mutation_state_v1",
+        "instance_id": str(case["instance_id"]),
+        "image_name": image_name,
+        "patch_direction": "clean_to_buggy",
+        "patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+        "source_state": "buggy",
+    }
+    marker_path = repo_dir / ".evolutefl_swesmith_case.json"
+    if not force and marker_path.is_file() and is_usable_source_repo(repo_dir):
+        try:
+            saved = json.loads(marker_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            saved = {}
+        if all(saved.get(key) == value for key, value in expected.items()):
+            _verify_applied_mutation(repo_dir, patch)
+            return repo_dir, saved
+    if require_existing:
+        raise ValueError(
+            "Explicit prepared repository is missing a verified SWE-smith mutation marker: "
+            f"{repo_dir}. Re-run --prepare-only with the current runner."
+        )
+
+    # Always copy a fresh clean image for this case: image-level cache reuse is
+    # unsafe once a case-specific mutation has been applied.
+    materialize_repo(image_name, repo_dir, force=True, allow_cache=False)
+    apply_clean_to_buggy_patch(repo_dir, patch)
+    state = {
+        **expected,
+        "applied": True,
+        "repository_identity": repository_identity_for_materialization(repo_dir),
+    }
+    write_json(marker_path, state)
+    return repo_dir, state
+
+
+def apply_clean_to_buggy_patch(repo_dir: Path, patch: str) -> None:
+    """Fail closed unless the mutation can be applied and then verified."""
+
+    check = subprocess.run(
+        ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+        cwd=repo_dir,
+        input=patch,
+        text=True,
+        capture_output=True,
+    )
+    if check.returncode != 0:
+        raise RuntimeError(
+            "SWE-smith clean_to_buggy patch cannot be applied to the materialized repository:\n"
+            f"{check.stderr.strip()}"
+        )
+    applied = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", "-"],
+        cwd=repo_dir,
+        input=patch,
+        text=True,
+        capture_output=True,
+    )
+    if applied.returncode != 0:
+        raise RuntimeError(
+            "SWE-smith mutation patch passed --check but failed while applying:\n"
+            f"{applied.stderr.strip()}"
+        )
+    _verify_applied_mutation(repo_dir, patch)
+
+
+def _verify_applied_mutation(repo_dir: Path, patch: str) -> None:
+    """Ensure the repository contains exactly the mutation direction expected."""
+
+    reverse = subprocess.run(
+        ["git", "apply", "--check", "--reverse", "--whitespace=nowarn", "-"],
+        cwd=repo_dir,
+        input=patch,
+        text=True,
+        capture_output=True,
+    )
+    forward = subprocess.run(
+        ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+        cwd=repo_dir,
+        input=patch,
+        text=True,
+        capture_output=True,
+    )
+    if reverse.returncode != 0 or forward.returncode == 0:
+        raise RuntimeError(
+            "Materialized repository does not verify as the expected buggy SWE-smith state. "
+            f"reverse_check={reverse.returncode}, forward_check={forward.returncode}"
+        )
+
+
+def repository_identity_for_materialization(repo_dir: Path) -> dict[str, str]:
+    """Record a compact audit identity without importing Explorer internals."""
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        text=True,
+        capture_output=True,
+    )
+    return {
+        "head": head.stdout.strip() if head.returncode == 0 else "unknown",
+        "status_sha256": hashlib.sha256(status.stdout.encode("utf-8")).hexdigest(),
+    }
+
+
+def materialize_container_testbed(container_name: str, repo_dir: Path, *, source_only: bool = False) -> None:
     """Extract ``/testbed`` through stdout so Docker Desktop never maps paths.
 
     In WSL, ``docker`` can be a bridge to ``docker.exe``.  A conventional
@@ -476,7 +657,8 @@ def materialize_container_testbed(container_name: str, repo_dir: Path) -> None:
             raise RuntimeError("Docker archive did not contain /testbed")
         if repo_dir.exists():
             shutil.rmtree(repo_dir)
-        shutil.copytree(extracted, repo_dir, symlinks=True)
+        ignore = shutil.ignore_patterns(".venv", "venv", "__pycache__", "node_modules") if source_only else None
+        shutil.copytree(extracted, repo_dir, symlinks=True, ignore=ignore)
 
 
 def find_cached_repo(image_name: str, *, exclude: Path) -> Path | None:
@@ -523,6 +705,27 @@ def reset_skill_bank(path: Path, out_dir: Path) -> None:
     path.write_text("", encoding="utf-8")
 
 
+def resume_case_artifacts(case_dir: Path, out_dir: Path) -> dict | None:
+    """Reuse completed exploration; archive interrupted attempts before retry."""
+    if not case_dir.exists() or not any(case_dir.iterdir()):
+        return None
+    result_path = case_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
+    completed = result.get("status") == "completed"
+    target = case_dir / "case_evolution" if completed else case_dir
+    if target.exists():
+        root = out_dir.resolve(strict=True)
+        resolved = target.resolve(strict=True)
+        if not resolved.is_relative_to(root) or target.is_symlink():
+            raise ValueError(f"Unsafe resume archive target: {target}")
+        # Preserve the old attempt, including failed API responses, for audit.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        destination = root / "resume_attempts" / case_dir.name / stamp
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        target.rename(destination)
+    return result if completed else None
+
+
 def load_resume_summaries(out_dir: Path, cases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Recover completed cases even when an interrupted run truncated its summary.
 
@@ -557,11 +760,11 @@ def load_resume_summaries(out_dir: Path, cases: list[dict[str, Any]]) -> dict[st
             evolution = json.loads(evolution_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if result.get("status") != "completed" or not evolution.get("eligible"):
+        if result.get("status") != "completed" or not evolution.get("eligible") or evolution.get("status", "completed") != "completed":
             continue
-        repo_dir = out_dir / "repos" / _safe_name(str(case.get("image_name") or ""))
+        repo_dir = swe_smith_case_repo_dir(out_dir / "repos", case)
         try:
-            ground_truth_functions = functions_from_patch(case.get("patch", ""), repo_dir)
+            ground_truth_functions = functions_from_patch(case.get("patch", ""), repo_dir, source_side="new")
         except Exception:  # noqa: BLE001 - preserve resume even if metric rebuild is unavailable.
             ground_truth_functions = []
         ranked_functions = result.get("ranked_functions", []) or []
@@ -587,6 +790,8 @@ def load_resume_summaries(out_dir: Path, cases: list[dict[str, Any]]) -> dict[st
                 "reflector_fault_family": evolution.get("reflector_fault_family"),
                 "fault_family_consistent": evolution.get("fault_family_consistent"),
                 "fault_target_selection": evolution.get("fault_target_selection", {}),
+                "retrieval_entry_changes": evolution.get("retrieval_entry_changes", []),
+                "fault_catalog_search_trace": evolution.get("fault_catalog_search_trace", {}),
             },
             "embedding_rebuild": {"recovered": True},
         }
@@ -646,6 +851,8 @@ def read_skill_usage(path: Path) -> dict[str, Any]:
         "fault_skill_attempted": False,
         "fault_skill_id": None,
         "fault_family": None,
+        "fault_skill_primary_family": None,
+        "fault_loaded_via_alias": False,
         "fault_catalog_count": 0,
         "fault_selector_selected": False,
         "fault_validator_applicable": False,
@@ -673,6 +880,8 @@ def read_skill_usage(path: Path) -> dict[str, Any]:
         elif event_name == "fault_skill_loaded":
             usage["fault_skill_id"] = event.get("loaded_skill_id")
             trace = event.get("search_trace") or {}
+            usage["fault_skill_primary_family"] = trace.get("loaded_skill_primary_family")
+            usage["fault_loaded_via_alias"] = bool(trace.get("loaded_via_alias"))
             usage["fault_catalog_count"] = int(trace.get("catalog_count") or 0)
             selector_id = (trace.get("selector") or {}).get("selected_skill_id")
             usage["fault_selector_selected"] = selector_id not in {None, "", "none", "null"}

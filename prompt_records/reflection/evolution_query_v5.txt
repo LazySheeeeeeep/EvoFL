@@ -1,0 +1,7 @@
+You prepare a search for reusable fault-localization investigation experience.
+Use the checked investigation conclusion and the issue to choose one supplied fault family and summarize the reusable problem pattern plus investigation direction. The family describes where the incorrect state originates, not merely where it is reported.
+Write a concise fault_subtype_query, normally one or two sentences. This is a catalog search description, not a reconstruction of the patch or a complete Skill. Abstract repository-specific symbols into their roles while preserving the distinguishing condition.
+Use each finding's learning_focus and explanation to retain the useful investigation distinction, such as a missing comparison, interpretation check, or ranking criterion. The Top-5 outcome is ranking feedback, not a choice between successful and failed investigation templates. Keep the nine fault families as the retrieval taxonomy; learning_focus describes the lesson rather than a new family.
+The runtime_fault_request records the earlier retrieval perspective. Retain its family when it remains appropriate; use the checked findings to correct it when necessary. The two directories will be searched together for one update candidate. Retrieval entries for the resulting Skill are decided later, so a disagreement alone does not establish another entry.
+Return exactly one JSON object:
+{"fault_family":"one supplied family ID","fault_subtype_query":"problem pattern and useful investigation direction"}

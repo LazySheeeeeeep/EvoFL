@@ -66,6 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_llm_args(evolve)
     add_embedding_override_args(evolve)
     evolve.add_argument("--case-run-dir", required=True)
+    evolve.add_argument("--repo-path", help="Required for v5 read-only supplementary investigation.")
+    evolve.add_argument("--patch-direction", choices=["clean_to_buggy", "buggy_to_fixed", "unknown"], default="unknown")
     evolve.add_argument("--repo", required=True)
     add_issue_args(evolve)
     evolve.add_argument("--ground-truth-patch-file")
@@ -152,6 +154,8 @@ def cmd_run_case_evolution(args: argparse.Namespace) -> Any:
     client = OpenAICompatibleClient.from_config(config["llm"])
     return run_case_evolution(
         case_run_dir=args.case_run_dir,
+        repo_path=args.repo_path,
+        patch_metadata={"source": args.ground_truth_patch_file or "caller", "direction": args.patch_direction},
         repo=args.repo,
         issue=read_issue(args),
         config=config,

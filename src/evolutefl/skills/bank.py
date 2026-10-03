@@ -16,7 +16,7 @@ from .embedding_store import (
     select_embedding_skills,
 )
 from .retrieval import DEFAULT_SKILL_TYPE_QUOTA, select_skills
-from .fault_taxonomy import validate_fault_family
+from .fault_taxonomy import normalize_retrieval_families, validate_fault_family
 from .schema import (
     SKILL_TYPES,
     DimensionSkill,
@@ -398,7 +398,7 @@ class SkillBankV0:
             (
                 skill
                 for skill in self.active_skills()
-                if skill.skill_type == "fault_skill" and skill.fault_family == family
+                if skill.skill_type == "fault_skill" and family in skill.retrieval_families
             ),
             key=lambda skill: (skill.title.lower(), skill.skill_id),
         )
@@ -406,6 +406,8 @@ class SkillBankV0:
             {
                 "skill_id": skill.skill_id,
                 "fault_subtype": skill.fault_subtype,
+                "fault_family": skill.fault_family,
+                "retrieval_families": skill.retrieval_families,
                 "title": skill.title,
                 "trigger": skill.trigger,
             }
@@ -746,6 +748,22 @@ class SkillBankV0:
                 return selected, trace
             return [], _failed_trace(query, f"Embedding retrieval failed: {exc}")
 
+    def fault_evolution_catalog(self, families: list[str]) -> dict[str, Any]:
+        """Union routing entries for reflection only, never duplicate knowledge."""
+        families = list(dict.fromkeys(validate_fault_family(f) for f in families))
+        candidates: dict[str, dict[str, Any]] = {}
+        counts = {}
+        for family in families:
+            entries = self.fault_catalog(family)["candidate_skills"]
+            counts[family] = len(entries)
+            for entry in entries:
+                candidate = candidates.setdefault(entry["skill_id"], {**entry, "matched_retrieval_families": []})
+                candidate["matched_retrieval_families"].append(family)
+        return {"candidate_skills": list(candidates.values()), "skill_search_trace": {
+            "retrieval_mode": "fault_multi_entry_catalog_v1", "queried_families": families,
+            "catalog_counts_by_family": counts, "unique_candidate_count": len(candidates),
+            "candidate_skill_ids": list(candidates)}}
+
     def search_for_v3_evolution(
         self,
         *,
@@ -765,7 +783,7 @@ class SkillBankV0:
         if (
             selected_fault is not None
             and selected_fault.skill_type == "fault_skill"
-            and selected_fault.fault_family == family
+            and family in selected_fault.retrieval_families
         ):
             fault_candidates.append(selected_fault.compact_dict())
         by_type: dict[str, list[dict[str, Any]]] = {"fault_skill": fault_candidates}
@@ -863,6 +881,9 @@ class SkillBankV0:
             raise ValueError(
                 "rewrite must preserve the target semantic identity; use create_new for a new center."
             )
+        if skill_type == "fault_skill" and "retrieval_families" not in update["skill"]:
+            # A legacy writer omitting aliases must not silently remove them.
+            card["retrieval_families"] = list(old.retrieval_families)
         new = DimensionSkill(
             skill_id=old.skill_id,
             status="active",
@@ -920,6 +941,7 @@ def _valid_complete_skill(value: Any, skill_type: str) -> dict[str, Any]:
         card = {
             "value": subtype,
             "fault_family": validate_fault_family(value.get("fault_family")),
+            "retrieval_families": normalize_retrieval_families(value.get("retrieval_families"), value.get("fault_family")),
             "fault_subtype": subtype,
             "title": str(value.get("title") or "").strip(),
             "trigger": str(value.get("trigger") or "").strip(),

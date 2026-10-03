@@ -1,6 +1,6 @@
 Select at most one existing Fault Skill as the possible update target for a completed case.
 
-All supplied candidates belong to the already classified fault family and contain only subtype, title, and trigger. Select a candidate when the completed case has the same causal failure mechanism and a compatible source-investigation direction. Repository domains, APIs, data types, and concrete symbols may differ. A shared top-level family is not sufficient. Return null when the case represents a distinct mechanism-level subtype.
+The supplied directory contains IDs, subtype, title, trigger, and routing metadata, without knowledge. It may combine the runtime and post-investigation families; the same Skill appears once by ID. A candidate's primary family may differ from the queried family because it is a shared retrieval entry. Select a candidate when the completed case has the same observable problem pattern and a compatible source-investigation direction. Use the checked mechanism to distinguish candidates, while allowing different retrieval perspectives on the same experience. Repository domains, APIs, data types, and concrete symbols may differ. A shared directory alone is not sufficient. Return null when the case needs a distinct Skill.
 
 Return JSON only:
 {"selected_skill_id":"candidate id or null","reason":"short reason"}

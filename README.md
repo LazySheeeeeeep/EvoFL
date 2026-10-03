@@ -1,99 +1,84 @@
-# EvoluteFL v0
+# EvoluteFL v5
 
-EvoluteFL is a skill-centric function-level fault localization prototype.
-Explorer uses a fixed toolset: `grep`, `read_file`, and `write`.
-Tools are not evolved.
+Function-level fault localization with evidence-grounded investigation experience.
+The active workflow uses only Fault Skills; Project and Strategy are inactive.
 
-EvoluteFL uses two types of localization skills.
-A skill is not an executable workflow.
-A skill is a reusable natural-language knowledge fragment for understanding a software system or narrowing the localization search space.
-
-## Skill Types
-
-- `project_skill`: reusable system-model fragments covering repository organization, component roles, functional relationships, and implementation boundaries.
-- `strategy_skill`: reusable diagnostic policies covering evidence collection, tracing, comparison, hypothesis evaluation, and suspicious-function ranking.
-
-## Runtime Flow
+## Localization
 
 ```text
-Case
--> project/strategy skill retrieval
--> two-type context assembly
--> Explorer with fixed tools
--> ranked functions
+Issue + repository -> initial source exploration -> load_fault_skill once
+-> continue investigation -> finish_localization (up to five functions)
 ```
 
-Skills provide localization context, not commands.
-Explorer remains free to search, inspect, and reason using fixed tools.
-Repository evidence from tools has priority over retrieved skills.
+V5 tools: `grep`, `find_symbol`, `read_symbol`, `read_file`, `read_observation`,
+and `write`. Python symbol search returns definition IDs, signatures and ranges;
+symbol reading includes decorators and supports continuation within the body.
+Source reads return up to 200 complete lines and target 16,000 source characters
+per page (a single oversized line is delivered whole). `next_start_line`
+identifies unread content. The observation layer preserves the entire page;
+it never clips serialized tool results. Replay returns exactly the originally
+delivered observation, not hidden raw content. Write saves notes only under the
+run's `artifacts/` directory. Fault loading selects one of nine families,
+uses a title/trigger catalog selector, then validates the selected knowledge.
+At most one Skill is loaded as a native tool response. No embedding service
+is required; an empty catalog is a valid no-Skill result.
 
-## Evolution Flow
+Calls may include `purpose`, `based_on` observation IDs and `candidate_updates`.
+Source definitions appearing in tool results are not automatic hypotheses.
+Logs retain exact tool responses and a complete action index. Default limits:
+30 steps, three finalization turns and 900 seconds.
+
+## Evolution
 
 ```text
-Trajectory
--> outcome labeling (success or failure)
--> trajectory-driven Reflector
--> bounded text edits or no_update
--> SkillBank update
--> future retrieval
+Completed trace -> indexed investigation
+-> read-only supplementary investigation (at most 16 calls)
+-> supported process lesson -> independent Fault catalog selection
+-> evidence-driven Reflector -> create / rewrite / preserve / no_update
 ```
 
-By default, successful completed cases and failed completed cases can both enter evolution consideration.
-Success means completed + Top-5 hit; failure means completed + Top-5 miss.
-Non-completed system failures are skipped unless `--force` is used.
+The investigator uses `grep`, `find_symbol`, `read_symbol`, `read_file`, and `read_observation` against the
+same buggy source. Ground truth is training-only. Original `obs-` evidence
+and supplementary `supp-` discoveries are separate. Every resolved finding
+anchors a reviewed original source observation. Unresolved findings never
+update the bank. Repository fingerprints prevent replay on changed code;
+old trajectory formats are rejected.
 
-Reflector consumes Explorer trajectory evidence directly, inspired by SkillOpt's trajectory-driven reflection style.
-The legacy Insight path is still available with `--legacy-insight`.
+Skills contain family, subtype, title, trigger and unordered knowledge strings.
+Evidence references remain in run artifacts, outside Skill cards. Existing
+complete-card versioning is reused. The active bank is
+`skill_pools/skill_bank_v5/skills.jsonl`.
 
-Reflector evaluates project and strategy knowledge independently, then edits `skill.knowledge`, `skill.trigger`, or `retrieval_text`.
-It does not create stages, workflows, tools, or prompt updates.
+## WSL Commands
 
-## CLI Examples
+Run from `/mnt/d/projects/EvoluteFL`. Configure credentials using environment
+variables such as `DEEPSEEK_API_KEY`, rather than result files.
 
-```powershell
-$env:PYTHONPATH="src"
-python -m evolutefl.cli show-tools
+```bash
+PYTHONPATH=src python3 -m pytest -q
+PYTHONPATH=src python3 -m evolutefl.cli show-tools
+PYTHONPATH=src python3 scripts/run_swesmith_case_by_case.py \
+  --provider deepseek --model deepseek-v4-flash --sample-size 2 \
+  --seed 20260907 --max-steps 30 --case-timeout-seconds 900 \
+  --output-dir runs/v5_smoke_2_deepseek_20260907
+python3 scripts/report_v5_run.py runs/v5_smoke_2_deepseek_20260907
 ```
 
-```powershell
-$env:PYTHONPATH="src"
-python -m evolutefl.cli search-skills-preview `
-  --repo sqlfluff/sqlfluff `
-  --issue-text "The --disable_progress_bar flag does not work in fix command."
-```
+Separate `run-case-evolution` requires `--case-run-dir`, `--repo-path`,
+`--repo`, issue input and ground-truth functions. For SWE-smith mutation patches,
+supply `--ground-truth-patch-file` and `--patch-direction clean_to_buggy`.
+A second successful Explorer run and repository tests are not required.
 
-```powershell
-$env:PYTHONPATH="src"
-python -m evolutefl.cli assemble-skills-preview --skill-ids fault_cli_option_compatibility_v1
-```
+Top-5 hit/miss remains a patch-function ranking outcome, not a judgment of
+investigation quality. The Investigator attributes each supported finding to
+evidence acquisition, interpretation, candidate ranking, or a useful observed
+practice, retaining uncertainty where the record is insufficient. One shared
+Reflector prompt uses these findings for both hit and miss cases. The summary
+records `learning_foci`; these are diagnostic metadata, not new Skill types.
+Older conclusions without this field remain unattributed (`uncertain`).
 
-```powershell
-$env:PYTHONPATH="src"
-python -m evolutefl.cli run-agent `
-  --repo-path . `
-  --repo demo/repo `
-  --base-commit unknown `
-  --instance-id demo__case `
-  --issue-text "A CLI option is ignored." `
-  --run-dir runs/demo_case
-```
-
-```powershell
-$env:PYTHONPATH="src"
-python -m evolutefl.cli run-case-evolution `
-  --case-run-dir runs/demo_case `
-  --repo demo/repo `
-  --issue-text "A CLI option is ignored." `
-  --ground-truth-patch-file patch.diff `
-  --force
-```
-
-Use `--legacy-insight` to explicitly run the old Insight -> Reflector path.
-Use `--no-reflect-success` or `--no-reflect-failure` to disable one outcome type.
-
-## Tests
-
-```powershell
-$env:PYTHONPATH="src"
-python -m pytest
-```
+Inspect `investigation_index.json`, `observations.jsonl`, `trajectory.jsonl`,
+then `case_evolution/supplementary/`, `investigation_conclusion.json`,
+`fault_reflector_output.json`, `applied_updates.json`, and
+`case_evolution_summary.json`. The two-case smoke tests protocol and
+traceability, not an accuracy improvement; frozen-bank ablations remain necessary.

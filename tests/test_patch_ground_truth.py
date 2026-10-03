@@ -40,6 +40,43 @@ def test_evaluate_ranked_functions_accepts_qualified_suffix() -> None:
     assert metrics["top1"] is True
 
 
+def test_evaluate_ranked_functions_normalizes_inner_class_method_separator() -> None:
+    metrics = evaluate_ranked_functions(
+        ["pkg/module.py::Worker::transform"],
+        ["pkg/module.py::Worker.transform"],
+    )
+
+    assert metrics["rank"] == 1
+    assert metrics["top1"] is True
+
+
+def test_functions_from_patch_does_not_cross_into_next_function_for_deleted_tail() -> None:
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        path = root / "pkg" / "module.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "def target():\n"
+            "    return value\n"
+            "def later():\n"
+            "    return 1\n",
+            encoding="utf-8",
+        )
+        patch = (
+            "diff --git a/pkg/module.py b/pkg/module.py\n"
+            "--- a/pkg/module.py\n"
+            "+++ b/pkg/module.py\n"
+            "@@ -1,5 +1,4 @@\n"
+            " def target():\n"
+            "-    setup()\n"
+            "     return value\n"
+            "-\n"
+            " def later():\n"
+        )
+
+        assert functions_from_patch(patch, root, source_side="new") == ["pkg/module.py::target"]
+
+
 def test_evaluate_ranked_functions_accepts_dotted_python_module_identity() -> None:
     metrics = evaluate_ranked_functions(
         ["sphinx.util.inspect.signature_from_str"],

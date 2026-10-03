@@ -19,3 +19,10 @@ skill_pools/skill_bank/embeddings/
 *.out
 *.synctex.gz
 *.pdf
+
+# Independent Overleaf repository; keep paper history out of the framework repo.
+/FSE_27/
+/FSE_27_overleaf_latest/
+/SWE-Exp/
+/.worktrees/
+/tmp/
