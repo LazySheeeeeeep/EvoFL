@@ -9,6 +9,110 @@ EvoFL converts both successful and failed localization trajectories into reusabl
 
 ![EvoFL workflow](assets/workflow.png)
 
+## 📥 Inputs and Outputs
+
+### Input: SWE-bench
+
+EvoFL takes an issue description and a buggy repository snapshot as input. To
+connect SWE-bench, normalize each instance to the following fields:
+
+| Field | Description |
+|---|---|
+| `instance_id` | SWE-bench instance identifier used as the stable case key. |
+| `repo` | Repository name in `owner/repository` form. |
+| `base_commit` | Buggy snapshot commit used to materialize the repository. |
+| `problem_statement` | Issue description visible to the localization agent. |
+| `created_at` | Issue creation time used by the chronological split. |
+| `patch` | Developer repair patch. It is used for experience learning and scoring, not injected into Explorer. |
+| `function_ground_truth` | Functions modified by the developer patch on the buggy snapshot. |
+
+The paper uses three curated SWE-bench sources:
+
+```text
+princeton-nlp/SWE-bench
+princeton-nlp/SWE-bench_Lite
+princeton-nlp/SWE-bench_Verified
+```
+
+Instances are split chronologically rather than randomly:
+
+```text
+Experience acquisition: created and merged before 2020-01-01
+Temporal buffer:        2020-01-01 to 2020-12-31
+Evaluation:             created on or after 2021-01-01
+```
+
+After normalization, place the frozen EvoFL manifests under the run directory
+expected by `run_main.py`:
+
+```text
+runs/rq1_temporal_deepseek_20260915/
+runs/rq1_expanded400_eval500_deepseek_20260922/
+```
+
+Repository snapshots are materialized from `repo` and `base_commit`. The patch
+and `function_ground_truth` remain hidden from the localization process and are
+used only during retrospective learning and final scoring.
+
+### Outputs
+
+All outputs are written under:
+
+```text
+runs/main_experiment/
+```
+
+```text
+runs/main_experiment/
+├── protocol.json
+├── config.json
+├── bootstrap_skills.jsonl
+├── frozen_skills.jsonl
+├── training/
+│   └── <instance_id>/
+│       ├── explorer/
+│       │   ├── trajectory.jsonl
+│       │   ├── observations.jsonl
+│       │   ├── investigation_index.json
+│       │   ├── fault_skill_search.json
+│       │   └── result.json
+│       ├── evolution/
+│       │   ├── supplementary/
+│       │   ├── investigation_conclusion.json
+│       │   ├── fault_reflector_output.json
+│       │   ├── applied_updates.json
+│       │   └── case_evolution_summary.json
+│       └── skills.jsonl
+├── with_skill/
+│   └── cases/
+│       └── <instance_id>/
+│           ├── trajectory.jsonl
+│           ├── observations.jsonl
+│           ├── fault_skill_search.json
+│           └── result.json
+├── paired/
+│   └── <instance_id>.json
+└── comparison_summary.json
+```
+
+| Output | Content |
+|---|---|
+| `trajectory.jsonl` | Chronological reasoning, tool actions, observations, and Skill-loading events. |
+| `observations.jsonl` | Exact tool responses delivered to the agent. |
+| `investigation_index.json` | Compact investigation timeline with observation references. |
+| `fault_skill_search.json` | Fault-family routing, selector output, and validator decision. |
+| `result.json` | Final ranked suspicious functions and localization status. |
+| `skills.jsonl` | Case-local Skill Bank transaction after create, rewrite, preserve, or no-update. |
+| `frozen_skills.jsonl` | Frozen Skill Bank used for evaluation on the 500 held-out instances. |
+| `paired/<instance_id>.json` | Predictions and metrics for each evaluated function. |
+| `comparison_summary.json` | Aggregate Top-1, Top-3, Top-5, and MRR results. |
+
+Ranked suspicious functions use the following identity format:
+
+```text
+relative/path/to/file.py::Class.method
+```
+
 ## 🛠️ Environment Setup
 
 EvoFL should be run in Linux or WSL with Python 3.10 or newer. The main runner
