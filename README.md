@@ -1,5 +1,14 @@
 # EvoFL: Self-Evolving Fault Localization via Retrospective-Analysis-based Skill Distillation
 
+## 📌 Introduction
+
+EvoFL converts both successful and failed localization trajectories into reusable localization skills through ground-truth-guided retrospective analysis.
+
+- **Successful trajectories:** EvoFL removes unreferenced observations, dead-end exploration, and redundant re-inspection, preserving only the diagnostic chain relevant to the ground-truth faulty entities.
+- **Failed trajectories:** EvoFL retrospectively reflects on intermediate judgments and salvages valid analyses that narrow the investigation toward the fault, even when the final localization is incorrect.
+
+![EvoFL workflow](assets/workflow.png)
+
 ## 🛠️ Environment Setup
 
 EvoFL should be run in Linux or WSL with Python 3.10 or newer. The main runner
