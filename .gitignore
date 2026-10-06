@@ -31,7 +31,7 @@ skill_pools/skill_bank/embeddings/
 /scripts/*
 !/scripts/run_main.py
 
-# Experimental banks and run outputs remain local; keep the directory marker.
-/skill_pools/skill_bank_v5/skills.jsonl
+# Experimental banks and run outputs remain local.
+/skill_pools/fault_skill_bank/
 /docs/
 /tests/

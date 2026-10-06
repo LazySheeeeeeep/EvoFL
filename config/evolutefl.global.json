@@ -69,7 +69,7 @@
     "reflector_candidate_top_k": 5
   },
   "skill_bank": {
-    "path": "skill_pools/skill_bank_v5/skills.jsonl",
+    "path": "skill_pools/fault_skill_bank/skills.jsonl",
     "enabled_skill_types": ["fault_skill"],
     "retrieval_mode": "lexical",
     "max_matched_skills": 2,
@@ -92,7 +92,7 @@
     "model": "jina-embeddings-v3",
     "query_task": "retrieval.query",
     "document_task": "retrieval.passage",
-    "cache_path": "skill_pools/skill_bank_v5/embeddings/jina_v3/skill_embeddings.jsonl",
+    "cache_path": "skill_pools/fault_skill_bank/embeddings/jina_v3/skill_embeddings.jsonl",
     "batch_size": 16,
     "timeout": 120
   }
