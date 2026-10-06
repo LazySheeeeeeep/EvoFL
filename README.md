@@ -13,20 +13,19 @@ EvoFL converts both successful and failed localization trajectories into reusabl
 
 ### Input: SWE-bench
 
-EvoFL takes an issue description and a buggy repository snapshot as input. To
-connect SWE-bench, normalize each instance to the following fields:
+EvoFL accepts a single SWE-bench instance together with its repository
+snapshot. The required fields are:
 
 | Field | Description |
 |---|---|
-| `instance_id` | SWE-bench instance identifier used as the stable case key. |
+| `instance_id` | SWE-bench instance identifier used as the stable run key. |
 | `repo` | Repository name in `owner/repository` form. |
 | `base_commit` | Buggy snapshot commit used to materialize the repository. |
 | `problem_statement` | Issue description visible to the localization agent. |
-| `created_at` | Issue creation time used by the chronological split. |
-| `patch` | Developer repair patch. It is used for experience learning and scoring, not injected into Explorer. |
-| `function_ground_truth` | Functions modified by the developer patch on the buggy snapshot. |
+| `patch` | Optional developer patch. It is used only after localization for retrospective learning or evaluation, and is never injected into Explorer. |
 
-The paper uses three curated SWE-bench sources:
+EvoFL can be connected to the official SWE-bench JSON/JSONL records or the
+Hugging Face datasets:
 
 ```text
 princeton-nlp/SWE-bench
@@ -34,84 +33,63 @@ princeton-nlp/SWE-bench_Lite
 princeton-nlp/SWE-bench_Verified
 ```
 
-Instances are split chronologically rather than randomly:
+To run an instance:
 
-```text
-Experience acquisition: created and merged before 2020-01-01
-Temporal buffer:        2020-01-01 to 2020-12-31
-Evaluation:             created on or after 2021-01-01
-```
+1. Load the SWE-bench record.
+2. Materialize `repo` at `base_commit` if the repository snapshot is not already available locally.
+3. Pass the issue text as `problem_statement` and the local repository path to EvoFL.
+4. Keep `patch` outside the localization context. It can be supplied afterward when EvoFL performs retrospective analysis or when predictions are scored.
 
-After normalization, place the frozen EvoFL manifests under the run directory
-expected by `run_main.py`:
+`function_ground_truth` is not a native SWE-bench field. It can be derived from
+the old-side functions touched by `patch` when the record is used for
+experience learning or function-level evaluation.
 
-```text
-runs/rq1_temporal_deepseek_20260915/
-runs/rq1_expanded400_eval500_deepseek_20260922/
-```
-
-Repository snapshots are materialized from `repo` and `base_commit`. The patch
-and `function_ground_truth` remain hidden from the localization process and are
-used only during retrospective learning and final scoring.
+Other SWE-bench fields, such as `test_patch`, `FAIL_TO_PASS`, and
+`PASS_TO_PASS`, may be retained in the input record but are not required by the
+localization process.
 
 ### Outputs
 
-All outputs are written under:
+For each SWE-bench instance, EvoFL produces:
 
 ```text
-runs/main_experiment/
-```
-
-```text
-runs/main_experiment/
-├── protocol.json
-├── config.json
-├── bootstrap_skills.jsonl
-├── frozen_skills.jsonl
-├── training/
-│   └── <instance_id>/
-│       ├── explorer/
-│       │   ├── trajectory.jsonl
-│       │   ├── observations.jsonl
-│       │   ├── investigation_index.json
-│       │   ├── fault_skill_search.json
-│       │   └── result.json
-│       ├── evolution/
-│       │   ├── supplementary/
-│       │   ├── investigation_conclusion.json
-│       │   ├── fault_reflector_output.json
-│       │   ├── applied_updates.json
-│       │   └── case_evolution_summary.json
-│       └── skills.jsonl
-├── with_skill/
-│   └── cases/
-│       └── <instance_id>/
-│           ├── trajectory.jsonl
-│           ├── observations.jsonl
-│           ├── fault_skill_search.json
-│           └── result.json
-├── paired/
-│   └── <instance_id>.json
-└── comparison_summary.json
+<run_dir>/
+├── result.json
+├── trajectory.jsonl
+├── observations.jsonl
+├── investigation_index.json
+├── fault_skill_request.json
+├── fault_skill_search.json
+└── case_evolution/
+    ├── supplementary/
+    ├── investigation_conclusion.json
+    ├── fault_reflector_output.json
+    ├── applied_updates.json
+    └── case_evolution_summary.json
 ```
 
 | Output | Content |
 |---|---|
+| `result.json` | Final ranked suspicious functions, status, and summary. |
 | `trajectory.jsonl` | Chronological reasoning, tool actions, observations, and Skill-loading events. |
 | `observations.jsonl` | Exact tool responses delivered to the agent. |
 | `investigation_index.json` | Compact investigation timeline with observation references. |
+| `fault_skill_request.json` | Structured request used to select a relevant Fault Skill. |
 | `fault_skill_search.json` | Fault-family routing, selector output, and validator decision. |
-| `result.json` | Final ranked suspicious functions and localization status. |
-| `skills.jsonl` | Case-local Skill Bank transaction after create, rewrite, preserve, or no-update. |
-| `frozen_skills.jsonl` | Frozen Skill Bank used for evaluation on the 500 held-out instances. |
-| `paired/<instance_id>.json` | Predictions and metrics for each evaluated function. |
-| `comparison_summary.json` | Aggregate Top-1, Top-3, Top-5, and MRR results. |
+| `case_evolution/investigation_conclusion.json` | Evidence-supported conclusion from retrospective analysis. |
+| `case_evolution/fault_reflector_output.json` | Candidate Skill update produced by the Reflector. |
+| `case_evolution/applied_updates.json` | Actual `create`, `rewrite`, `preserve`, or `no_update` decision applied to the Skill Bank. |
+| `case_evolution/case_evolution_summary.json` | Outcome, learning focus, and evolution status for the instance. |
 
-Ranked suspicious functions use the following identity format:
+Suspicious functions are ranked in descending order and use the following
+identity format:
 
 ```text
 relative/path/to/file.py::Class.method
 ```
+
+The evolving Skill Bank is stored separately as JSONL. Each skill contains a
+title, fault category, trigger, and a list of procedural knowledge statements.
 
 ## 🛠️ Environment Setup
 
