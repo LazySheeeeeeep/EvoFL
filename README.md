@@ -51,45 +51,27 @@ python -m pip install requests
 PYTHONPATH=src python3 scripts/run_main.py --help
 ```
 
-## 🔑 API Access
+## 🚀 Quick Start
 
-EvoFL uses an OpenAI-compatible Chat Completions API. You can connect any
-provider that implements the same interface.
+### 1. Configure the API
 
-Set the API key:
+EvoFL uses an OpenAI-compatible Chat Completions API.
 
-```bash
-export OPENAI_API_KEY="your-api-key"
-```
+- `OPENAI_API_KEY`: API credential. This must be set before running the model-backed phases.
+- `OPENAI_BASE_URL`: API base URL. Set this when using a provider other than the default OpenAI endpoint.
+- `OPENAI_MODEL`: model identifier used by the provider.
+- `EVOLUTEFL_SUPPORTS_TOOL_CHOICE=false`: optional compatibility switch for providers that support tools but reject an explicit `tool_choice` parameter.
+- `GITHUB_TOKEN` or `GH_TOKEN`: optional GitHub credential used when repository metadata or source files are not already cached.
 
-Set the API endpoint when it is not the default OpenAI endpoint:
-
-```bash
-export OPENAI_BASE_URL="https://your-provider.example/v1"
-```
-
-Set the model name used by the provider:
-
-```bash
-export OPENAI_MODEL="your-model-name"
-```
-
-Some providers support tool calling but reject an explicit `tool_choice`
-parameter. In that case, disable it:
-
-```bash
-export EVOLUTEFL_SUPPORTS_TOOL_CHOICE=false
-```
-
-The endpoint must accept OpenAI-compatible requests at:
+The configured endpoint must accept OpenAI-compatible requests at:
 
 ```text
 {OPENAI_BASE_URL}/chat/completions
 ```
 
-Do not commit API keys or write them into configuration files.
+Do not write API keys or tokens into configuration files.
 
-## 🚀 Quick Start
+### 2. Run the experiment
 
 ```bash
 export OPENAI_API_KEY="your-api-key"
@@ -103,6 +85,8 @@ python3 scripts/run_main.py \
 ```
 
 `--workers` accepts values from `1` to `8`.
+
+### 3. Output
 
 All experiment outputs are written to:
 
